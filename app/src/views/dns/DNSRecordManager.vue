@@ -1,36 +1,37 @@
 <script setup lang="ts">
-import type { DNSRecord, RecordListParams, RecordPayload } from '@/api/dns'
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
-import { message } from 'ant-design-vue'
+import type { DNSRecord, DNSRecordLine, RecordListParams, RecordPayload } from '@/api/dns'
+import { PlusOutlined, ReloadOutlined } from '@antdv-next/icons'
+import { message } from 'antdv-next'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { dnsApi } from '@/api/dns'
 import FooterToolBar from '@/components/FooterToolbar'
 import { useDnsStore } from '@/pinia/moudule/dns'
 import DNSRecordFilter from '@/views/dns/components/DNSRecordFilter.vue'
 import DNSRecordForm from '@/views/dns/components/DNSRecordForm.vue'
 import DNSRecordTable from '@/views/dns/components/DNSRecordTable.vue'
 
+interface DNSRecordTableInstance {
+  resetPagination: () => void
+}
+
 const route = useRoute()
 const store = useDnsStore()
 const router = useRouter()
+const recordTable = useTemplateRef<DNSRecordTableInstance>('recordTable')
 
 const filters = ref<RecordListParams>({
   name: '',
   type: '',
 })
 
-const pagination = ref({
-  current: 1,
-  pageSize: 50,
-  total: 0,
-})
-
-const pageSizeOptions = ['20', '50', '100', '200']
-
 const domainId = computed(() => Number(route.params.id))
 
 const isDrawerOpen = ref(false)
+const isSavingRecord = ref(false)
 const editingRecord = ref<DNSRecord | null>(null)
+const recordLines = ref<DNSRecordLine[]>([])
+const isRecordLinesLoading = ref(false)
 const formModel = ref<RecordPayload>({
   type: 'A',
   name: '@',
@@ -38,10 +39,32 @@ const formModel = ref<RecordPayload>({
   ttl: 600,
 })
 
-const showProxiedToggle = computed(() => {
+const isCloudflare = computed(() => {
   const provider = store.currentDomain?.dns_credential?.provider ?? ''
   return provider.toLowerCase().includes('cloudflare')
 })
+
+const isAliDNS = computed(() => {
+  return store.currentDomain?.dns_credential?.provider_code?.toLowerCase() === 'alidns'
+})
+
+const isHuaweiCloud = computed(() => {
+  return store.currentDomain?.dns_credential?.provider_code?.toLowerCase() === 'huaweicloud'
+})
+
+const defaultRecordLine = computed(() => {
+  if (isAliDNS.value)
+    return 'default'
+  if (isHuaweiCloud.value)
+    return 'default_view'
+  return undefined
+})
+
+const supportsRecordLines = computed(() => Boolean(defaultRecordLine.value))
+
+const showProxiedToggle = computed(() => isCloudflare.value)
+
+const showCommentField = computed(() => isCloudflare.value)
 
 const contentSuggestions = computed(() => {
   const unique = new Set<string>()
@@ -51,7 +74,7 @@ const contentSuggestions = computed(() => {
       unique.add(record.content)
     }
   })
-  return Array.from(unique)
+  return [...unique]
 })
 
 const pageTitle = computed(() => {
@@ -60,22 +83,25 @@ const pageTitle = computed(() => {
 
 async function initData() {
   await store.fetchDomainDetail(domainId.value)
-  pagination.value.current = 1
   await fetchRecords()
+  if (supportsRecordLines.value) {
+    await fetchRecordLines()
+  }
+}
+
+async function fetchRecordLines() {
+  isRecordLinesLoading.value = true
+  try {
+    const { data } = await dnsApi.listRecordLines(domainId.value)
+    recordLines.value = data
+  }
+  finally {
+    isRecordLinesLoading.value = false
+  }
 }
 
 async function fetchRecords() {
-  await store.fetchRecords(domainId.value, {
-    ...filters.value,
-    page: pagination.value.current,
-    per_page: pagination.value.pageSize,
-  })
-  const meta = store.recordsPagination
-  pagination.value = {
-    current: meta?.current_page ?? pagination.value.current,
-    pageSize: meta?.per_page ?? pagination.value.pageSize,
-    total: meta?.total ?? 0,
-  }
+  await store.fetchAllRecords(domainId.value, filters.value)
 }
 
 function openCreateDrawer() {
@@ -85,6 +111,7 @@ function openCreateDrawer() {
     name: '@',
     content: '',
     ttl: 600,
+    line: defaultRecordLine.value,
   }
   isDrawerOpen.value = true
 }
@@ -96,44 +123,52 @@ function openEditDrawer(record: DNSRecord) {
     name: record.name,
     content: record.content,
     ttl: record.ttl,
+    line: record.line || defaultRecordLine.value,
     priority: record.priority,
     weight: record.weight,
     proxied: record.proxied,
+    comment: record.comment,
   }
   isDrawerOpen.value = true
 }
 
-async function handleSubmit() {
-  if (editingRecord.value) {
-    await store.updateRecord(domainId.value, editingRecord.value.id, formModel.value)
-    message.success($gettext('Record updated'))
-  }
-  else {
-    await store.createRecord(domainId.value, formModel.value)
-    message.success($gettext('Record created'))
-  }
+function closeRecordDrawer() {
+  if (isSavingRecord.value)
+    return
+
   isDrawerOpen.value = false
+}
+
+async function handleSubmit() {
+  if (isSavingRecord.value)
+    return
+
+  isSavingRecord.value = true
+  try {
+    if (editingRecord.value) {
+      await store.updateRecord(domainId.value, editingRecord.value.id, formModel.value)
+      message.success($gettext('Record updated'))
+    }
+    else {
+      await store.createRecord(domainId.value, formModel.value)
+      message.success($gettext('Record created'))
+    }
+    await fetchRecords()
+    isDrawerOpen.value = false
+  }
+  finally {
+    isSavingRecord.value = false
+  }
 }
 
 async function handleDelete(record: DNSRecord) {
   await store.deleteRecord(domainId.value, record.id)
+  await fetchRecords()
   message.success($gettext('Record deleted'))
 }
 
 function handleFilterSubmit() {
-  pagination.value.current = 1
-  fetchRecords()
-}
-
-function handlePageChange(page: number, pageSize: number) {
-  pagination.value.current = page
-  pagination.value.pageSize = pageSize
-  fetchRecords()
-}
-
-function handlePageSizeChange(current: number, size: number) {
-  pagination.value.current = current
-  pagination.value.pageSize = size
+  recordTable.value?.resetPagination()
   fetchRecords()
 }
 
@@ -175,43 +210,43 @@ onBeforeUnmount(() => {
       <DNSRecordFilter v-model:filters="filters" @submit="handleFilterSubmit" />
 
       <DNSRecordTable
+        ref="recordTable"
         class="mt-4"
         :records="store.records"
         :loading="store.recordsLoading"
         :show-proxied="showProxiedToggle"
+        :show-comment="showCommentField"
+        :show-line="supportsRecordLines"
+        :line-options="recordLines"
         @edit="openEditDrawer"
         @delete="handleDelete"
       />
-      <div class="mt-4 flex justify-end">
-        <APagination
-          :current="pagination.current"
-          :page-size="pagination.pageSize"
-          :total="pagination.total"
-          :show-size-changer="true"
-          :page-size-options="pageSizeOptions"
-          @change="handlePageChange"
-          @show-size-change="handlePageSizeChange"
-        />
-      </div>
     </ACard>
 
     <ADrawer
       :open="isDrawerOpen"
       :title="editingRecord ? $gettext('Edit Record') : $gettext('Create Record')"
-      width="480"
-      @close="isDrawerOpen = false"
+      :size="480"
+      @close="closeRecordDrawer"
     >
       <DNSRecordForm
         v-model:record="formModel"
+        :show-name="true"
         :show-proxied="showProxiedToggle"
+        :show-comment="showCommentField"
+        :show-line="supportsRecordLines"
+        :line-options="recordLines"
+        :is-line-loading="isRecordLinesLoading"
+        :default-line-code="defaultRecordLine"
+        :line-disabled="Boolean(editingRecord) && isHuaweiCloud"
         :value-suggestions="contentSuggestions"
       />
       <template #footer>
         <ASpace>
-          <AButton @click="isDrawerOpen = false">
+          <AButton :disabled="isSavingRecord" @click="closeRecordDrawer">
             {{ $gettext('Cancel') }}
           </AButton>
-          <AButton type="primary" @click="handleSubmit">
+          <AButton type="primary" :loading="isSavingRecord" @click="handleSubmit">
             {{ $gettext('Save') }}
           </AButton>
         </ASpace>

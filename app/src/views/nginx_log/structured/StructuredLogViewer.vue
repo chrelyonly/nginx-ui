@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import type { SorterResult, TablePaginationConfig } from 'ant-design-vue/es/table/interface'
+import type { TableSorterResult as SorterResult, TablePaginationConfig } from 'antdv-next'
 import type { AccessLogEntry, AdvancedSearchRequest, PreflightResponse } from '@/api/nginx_log'
-import { DownOutlined, ExclamationCircleOutlined, ReloadOutlined } from '@ant-design/icons-vue'
-import { Tag } from 'ant-design-vue'
+import { DownOutlined, ExclamationCircleOutlined, ReloadOutlined } from '@antdv-next/icons'
+import { DatePicker, Tag } from 'antdv-next'
 import dayjs from 'dayjs'
 import nginx_log from '@/api/nginx_log'
+import gettext from '@/gettext'
 import { bytesToSize } from '@/lib/helper'
 import { useWebSocketEventBusStore } from '@/pinia'
 import LoadingState from '../components/LoadingState.vue'
 import { useIndexProgress } from '../composables/useIndexProgress'
 import SearchFilters from './components/SearchFilters.vue'
+import { getInitialStructuredTimeRange } from './timeRange'
+
+const props = defineProps<Props>()
+
+const { RangePicker } = DatePicker
 
 interface Props {
   logPath?: string
@@ -21,9 +27,8 @@ interface SearchSummary {
   total_traffic?: number
   unique_pages?: number
   avg_traffic_per_pv?: number
+  traffic_approximate?: boolean
 }
-
-const props = defineProps<Props>()
 
 const { message } = App.useApp()
 
@@ -179,6 +184,29 @@ function getSortOrder(fieldName: string): 'ascend' | 'descend' | undefined {
   return undefined
 }
 
+function buildLocationLabel(record: AccessLogEntry): string {
+  const isChineseLocale = gettext.current.toLowerCase().startsWith('zh')
+  const displayRegion = isChineseLocale && record.region_code?.trim() === 'CN' ? '中国' : record.region_code
+
+  const locationParts = [displayRegion, record.province, record.city]
+    .map(part => part?.trim())
+    .filter((part): part is string => Boolean(part))
+
+  const customParts = [record.c1, record.c2, record.c3, record.c4]
+    .map(part => part?.trim())
+    .filter((part): part is string => Boolean(part))
+
+  const baseLabel = locationParts.join(' · ')
+  if (customParts.length === 0)
+    return baseLabel
+
+  const customLabel = customParts.join(' · ')
+  if (!baseLabel)
+    return customLabel
+
+  return `${baseLabel} · ${customLabel}`
+}
+
 // Table columns configuration
 const structuredLogColumns = computed(() => [
   {
@@ -188,7 +216,7 @@ const structuredLogColumns = computed(() => [
     fixed: 'left' as const,
     sorter: true,
     sortOrder: getSortOrder('timestamp'),
-    customRender: ({ record }: { record: AccessLogEntry }) => h('span', dayjs.unix(record.timestamp).format('YYYY-MM-DD HH:mm:ss')),
+    render: (_value: unknown, record: AccessLogEntry) => h('span', dayjs.unix(record.timestamp).format('YYYY-MM-DD HH:mm:ss')),
   },
   {
     title: $gettext('IP'),
@@ -196,20 +224,11 @@ const structuredLogColumns = computed(() => [
     width: 350,
     sorter: true,
     sortOrder: getSortOrder('ip'),
-    customRender: ({ record }: { record: AccessLogEntry }) => {
-      const locationParts: string[] = []
-      if (record.region_code) {
-        locationParts.push(record.region_code)
-      }
-      if (record.province) {
-        locationParts.push(record.province)
-      }
-      if (record.city) {
-        locationParts.push(record.city)
-      }
+    render: (_value: unknown, record: AccessLogEntry) => {
+      const locationLabel = (record.ip_location_label || '').trim() || buildLocationLabel(record)
 
       return h('div', { class: 'flex items-center gap-2' }, [
-        locationParts.length > 0 ? h(Tag, { color: 'blue', size: 'small' }, { default: () => locationParts.join(' · ') }) : null,
+        locationLabel ? h(Tag, { color: 'blue', size: 'small' }, { default: () => locationLabel }) : null,
         h('span', record.ip),
       ])
     },
@@ -221,7 +240,7 @@ const structuredLogColumns = computed(() => [
       showTitle: true,
     },
     width: 350,
-    customRender: ({ record }: { record: AccessLogEntry }) => {
+    render: (_value: unknown, record: AccessLogEntry) => {
       let methodColor = 'default'
       if (record.method === 'GET')
         methodColor = 'green'
@@ -243,7 +262,7 @@ const structuredLogColumns = computed(() => [
     width: 80,
     sorter: true,
     sortOrder: getSortOrder('status'),
-    customRender: ({ record }: { record: AccessLogEntry }) => h(Tag, { color: getStatusColor(record.status) }, { default: () => record.status }),
+    render: (_value: unknown, record: AccessLogEntry) => h(Tag, { color: getStatusColor(record.status) }, { default: () => record.status }),
   },
   {
     title: $gettext('Size'),
@@ -251,7 +270,7 @@ const structuredLogColumns = computed(() => [
     width: 80,
     sorter: true,
     sortOrder: getSortOrder('bytes_sent'),
-    customRender: ({ record }: { record: AccessLogEntry }) => h('span', bytesToSize(record.bytes_sent)),
+    render: (_value: unknown, record: AccessLogEntry) => h('span', bytesToSize(record.bytes_sent)),
   },
   {
     title: $gettext('Browser'),
@@ -259,7 +278,7 @@ const structuredLogColumns = computed(() => [
     width: 120,
     sorter: true,
     sortOrder: getSortOrder('browser'),
-    customRender: ({ record }: { record: AccessLogEntry }) => {
+    render: (_value: unknown, record: AccessLogEntry) => {
       if (record.browser && record.browser !== 'Unknown') {
         const browserText = record.browser_version
           ? `${record.browser} ${record.browser_version}`
@@ -275,7 +294,7 @@ const structuredLogColumns = computed(() => [
     width: 120,
     sorter: true,
     sortOrder: getSortOrder('os'),
-    customRender: ({ record }: { record: AccessLogEntry }) => {
+    render: (_value: unknown, record: AccessLogEntry) => {
       if (record.os && record.os !== 'Unknown') {
         const osText = record.os_version
           ? `${record.os} ${record.os_version}`
@@ -291,7 +310,7 @@ const structuredLogColumns = computed(() => [
     width: 90,
     sorter: true,
     sortOrder: getSortOrder('device_type'),
-    customRender: ({ record }: { record: AccessLogEntry }) => record.device_type
+    render: (_value: unknown, record: AccessLogEntry) => record.device_type
       ? h(Tag, { color: getDeviceColor(record.device_type), size: 'small' }, { default: () => record.device_type })
       : null,
   },
@@ -300,7 +319,7 @@ const structuredLogColumns = computed(() => [
     dataIndex: 'referer',
     ellipsis: true,
     width: 200,
-    customRender: ({ record }: { record: AccessLogEntry }) => record.referer && record.referer !== '-'
+    render: (_value: unknown, record: AccessLogEntry) => record.referer && record.referer !== '-'
       ? h('span', record.referer)
       : null,
   },
@@ -308,14 +327,14 @@ const structuredLogColumns = computed(() => [
 
 // Time range presets (Grafana-style)
 const timePresets = [
-  { label: () => $gettext('Last 15 minutes'), value: () => ({ start: dayjs().subtract(15, 'minute'), end: dayjs() }) },
-  { label: () => $gettext('Last 30 minutes'), value: () => ({ start: dayjs().subtract(30, 'minute'), end: dayjs() }) },
-  { label: () => $gettext('Last hour'), value: () => ({ start: dayjs().subtract(1, 'hour'), end: dayjs() }) },
-  { label: () => $gettext('Last 4 hours'), value: () => ({ start: dayjs().subtract(4, 'hour'), end: dayjs() }) },
-  { label: () => $gettext('Last 12 hours'), value: () => ({ start: dayjs().subtract(12, 'hour'), end: dayjs() }) },
-  { label: () => $gettext('Last 24 hours'), value: () => ({ start: dayjs().subtract(24, 'hour'), end: dayjs() }) },
-  { label: () => $gettext('Last 7 days'), value: () => ({ start: dayjs().subtract(7, 'day'), end: dayjs() }) },
-  { label: () => $gettext('Last 30 days'), value: () => ({ start: dayjs().subtract(30, 'day'), end: dayjs() }) },
+  { key: 'last-15-minutes', label: () => $gettext('Last 15 minutes'), value: () => ({ start: dayjs().subtract(15, 'minute'), end: dayjs() }) },
+  { key: 'last-30-minutes', label: () => $gettext('Last 30 minutes'), value: () => ({ start: dayjs().subtract(30, 'minute'), end: dayjs() }) },
+  { key: 'last-hour', label: () => $gettext('Last hour'), value: () => ({ start: dayjs().subtract(1, 'hour'), end: dayjs() }) },
+  { key: 'last-4-hours', label: () => $gettext('Last 4 hours'), value: () => ({ start: dayjs().subtract(4, 'hour'), end: dayjs() }) },
+  { key: 'last-12-hours', label: () => $gettext('Last 12 hours'), value: () => ({ start: dayjs().subtract(12, 'hour'), end: dayjs() }) },
+  { key: 'last-24-hours', label: () => $gettext('Last 24 hours'), value: () => ({ start: dayjs().subtract(24, 'hour'), end: dayjs() }) },
+  { key: 'last-7-days', label: () => $gettext('Last 7 days'), value: () => ({ start: dayjs().subtract(7, 'day'), end: dayjs() }) },
+  { key: 'last-30-days', label: () => $gettext('Last 30 days'), value: () => ({ start: dayjs().subtract(30, 'day'), end: dayjs() }) },
 ]
 
 // Load structured logs function - now only uses advanced search
@@ -391,20 +410,18 @@ async function loadPreflight(): Promise<boolean> {
     if (preflightResponse.value.available && preflightResponse.value.time_range) {
       // Cache this path as valid and set time range
       pathValidationCache.value.set(currentPath, true)
-      // Set time range to full days: start_date 00:00:00 to end_date 23:59:59
-      const startTime = dayjs.unix(preflightResponse.value.time_range.start).startOf('day')
-      const endTime = dayjs.unix(preflightResponse.value.time_range.end).endOf('day')
-
-      timeRange.value.start = startTime
-      timeRange.value.end = endTime
+      // Keep the default query bounded even when rotated logs span years.
+      // Anchor the window to the latest indexed entry so historical logs work too.
+      timeRange.value = getInitialStructuredTimeRange(
+        dayjs.unix(preflightResponse.value.time_range.start),
+        dayjs.unix(preflightResponse.value.time_range.end),
+      )
       return true // Index is ready
     }
     else {
       // Index is not ready, will wait for event notification
       // Don't show message here - let the UI status handle it
-      // Use default range temporarily
-      timeRange.value.start = dayjs().subtract(7, 'day')
-      timeRange.value.end = dayjs()
+      timeRange.value = getInitialStructuredTimeRange()
       return false // Index not ready
     }
   }
@@ -418,8 +435,7 @@ async function loadPreflight(): Promise<boolean> {
 
     // For other errors, set fallback range but don't show error message here
     // The error will be handled by the caller
-    timeRange.value.start = dayjs().subtract(7, 'day')
-    timeRange.value.end = dayjs()
+    timeRange.value = getInitialStructuredTimeRange()
     throw error // Let the caller handle the error message
   }
 }
@@ -611,7 +627,7 @@ onMounted(async () => {
 
   // Subscribe to index ready notifications
   indexReadySubscriptionId = websocketEventBus.subscribe('nginx_log_index_ready', data => {
-    setTimeout(() => handleIndexReadyNotification(data), 1000)
+    setTimeout(handleIndexReadyNotification, 1000, data)
   })
 
   indexingStatus.value = 'indexing'
@@ -697,19 +713,18 @@ watch(timeRange, () => {
           </div>
           <ASpace wrap>
             <ADropdown placement="bottomLeft">
-              <template #overlay>
-                <AMenu @click="({ key }) => applyTimePreset(timePresets[Number(key)])">
-                  <AMenuItem v-for="(preset, index) in timePresets" :key="index">
-                    {{ preset.label() }}
-                  </AMenuItem>
-                </AMenu>
+              <template #popupRender>
+                <AMenu
+                  :items="timePresets.map(preset => ({ key: preset.key, label: preset.label() }))"
+                  @click="({ key }) => applyTimePreset(timePresets.find(preset => preset.key === key)!)"
+                />
               </template>
               <AButton>
                 {{ $gettext('Quick Select') }}
                 <DownOutlined />
               </AButton>
             </ADropdown>
-            <ARangePicker
+            <RangePicker
               v-model:value="dateRange"
               show-time
               format="YYYY-MM-DD HH:mm:ss"
@@ -777,10 +792,17 @@ watch(timeRange, () => {
               />
             </div>
             <div class="text-center">
-              <AStatistic
-                :title="$gettext('Traffic')"
-                :value="bytesToSize(searchSummary?.total_traffic || 0)"
-              />
+              <ATooltip
+                :title="searchSummary?.traffic_approximate
+                  ? $gettext('The result set is too large to sum exactly, this value is extrapolated from a sample')
+                  : undefined"
+              >
+                <AStatistic
+                  :title="$gettext('Traffic')"
+                  :prefix="searchSummary?.traffic_approximate ? '~' : undefined"
+                  :value="bytesToSize(searchSummary?.total_traffic || 0)"
+                />
+              </ATooltip>
             </div>
             <div class="text-center">
               <AStatistic
@@ -805,7 +827,17 @@ watch(timeRange, () => {
               current: currentPage,
               pageSize,
               total: searchTotal,
-              showSizeChanger: true,
+              /* Fix pagination page size selector width */
+              showSizeChanger: {
+                styles: {
+                  root: { minWidth: '100px' },
+                  content: { minWidth: '100px' },
+                  /* Ensure the dropdown has enough width */
+                  popup: {
+                    listItem: { minWidth: '100px' },
+                  },
+                },
+              },
               showQuickJumper: true,
               pageSizeOptions: ['50', '100', '200', '500', '1000'],
               showTotal: (total, range) => $gettext('%{start}-%{end} of %{total} items', {
@@ -860,19 +892,3 @@ watch(timeRange, () => {
     </div>
   </div>
 </template>
-
-<style scoped>
-/* Fix pagination page size selector width */
-:deep(.log-table-container .ant-pagination-options-size-changer .ant-select) {
-  min-width: 100px !important;
-}
-
-:deep(.log-table-container .ant-pagination-options-size-changer .ant-select-selector) {
-  min-width: 100px !important;
-}
-
-/* Ensure the dropdown has enough width */
-:deep(.ant-select-dropdown .ant-select-item) {
-  min-width: 100px;
-}
-</style>

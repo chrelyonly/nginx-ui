@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CloseCircleOutlined } from '@ant-design/icons-vue'
+import { CloseCircleOutlined } from '@antdv-next/icons'
 import { useElementSize } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 import { useSelfCheckStore } from './store'
@@ -11,7 +11,7 @@ const props = defineProps<{
 
 const router = useRouter()
 const selfCheckStore = useSelfCheckStore()
-const { hasError, loading } = storeToRefs(selfCheckStore)
+const { hasError, loading, data } = storeToRefs(selfCheckStore)
 
 const alertEl = useTemplateRef('alertEl')
 const { width: alertWidth } = useElementSize(alertEl)
@@ -26,6 +26,15 @@ const iconRightPosition = computed(() => {
   return props.userWrapperWidth ? `${props.userWrapperWidth + 50}px` : '50px'
 })
 
+const allFailingAreFixable = computed(() => {
+  const failing = data.value?.filter(r => r.status === 'error') ?? []
+  return failing.length > 0 && failing.every(r => r.fixable)
+})
+
+const actionLabel = computed(() =>
+  allFailingAreFixable.value ? $gettext('Fix') : $gettext('Check'),
+)
+
 onMounted(() => {
   selfCheckStore.check()
 })
@@ -34,10 +43,10 @@ onMounted(() => {
 <template>
   <div v-show="hasError && !loading">
     <div ref="alertEl" class="self-check-alert" :style="{ visibility: shouldHideAlert ? 'hidden' : 'visible' }">
-      <AAlert type="error" show-icon :message="$gettext('Self check failed, Nginx UI may not work properly')">
+      <AAlert type="error" show-icon :title="$gettext('Self check failed, Nginx UI may not work properly')">
         <template #action>
           <AButton class="ml-4" size="small" danger @click="router.push('/system/self_check')">
-            {{ $gettext('Check') }}
+            {{ actionLabel }}
           </AButton>
         </template>
       </AAlert>
@@ -61,7 +70,7 @@ onMounted(() => {
           </div>
           <div>
             <AButton size="small" danger @click="router.push('/system/self_check')">
-              {{ $gettext('Check') }}
+              {{ actionLabel }}
             </AButton>
           </div>
         </div>

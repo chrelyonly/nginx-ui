@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Ref } from 'vue'
-import { CheckCircleOutlined, DownloadOutlined, InfoCircleOutlined } from '@ant-design/icons-vue'
+import { CheckCircleOutlined, DownloadOutlined, InfoCircleOutlined } from '@antdv-next/icons'
 import geolite from '@/api/geolite'
 import { formatDateTime } from '@/lib/helper'
 import { useWebSocket } from '@/lib/websocket'
@@ -8,6 +8,12 @@ import { useWebSocket } from '@/lib/websocket'
 interface Emits {
   (e: 'downloadComplete'): void
 }
+
+const props = withDefaults(defineProps<{
+  hideRedownload?: boolean
+}>(), {
+  hideRedownload: false,
+})
 
 const emit = defineEmits<Emits>()
 
@@ -147,7 +153,7 @@ defineExpose({
   <div>
     <AAlert
       v-if="!geoLiteStatus.exists && !downloading"
-      :message="$gettext('GeoLite2 Database Required')"
+      :title="$gettext('GeoLite2 Database Required')"
       type="info"
       show-icon
       :icon="h(InfoCircleOutlined)"
@@ -159,13 +165,16 @@ defineExpose({
           <p class="text-sm">
             {{ $gettext('Alternatively, if you cannot download the database, you can manually place GeoLite2-City.mmdb in the same directory as app.ini.') }}
           </p>
+          <p class="text-sm">
+            {{ $gettext('If you want to enable custom MMDB data, configure `IndexCustomMMDB` and place the generated file in the same directory as app.ini.') }}
+          </p>
         </div>
       </template>
     </AAlert>
 
     <AAlert
       v-else-if="geoLiteStatus.exists && !downloading"
-      :message="$gettext('GeoLite2 Database Installed')"
+      :title="$gettext('GeoLite2 Database Installed')"
       type="success"
       show-icon
       :icon="h(CheckCircleOutlined)"
@@ -187,7 +196,7 @@ defineExpose({
           {{ $gettext('Download GeoLite2 Database') }}
         </AButton>
         <AButton
-          v-else
+          v-else-if="!props.hideRedownload"
           :loading="geoLiteLoading"
           :disabled="downloading"
           @click="downloadGeoLiteDB"

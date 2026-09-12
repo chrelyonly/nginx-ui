@@ -29,6 +29,14 @@ export const zhCNConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
           ]
         },
         {
+          text: '部署指南',
+          collapsed: false,
+          items: [
+            { text: '在 Docker 中管理宿主机 Nginx', link: '/zh_CN/guide/manage-host-nginx-from-docker' },
+            { text: '使用集群节点管理多主机 Nginx', link: '/zh_CN/guide/manage-multi-host-nginx-with-cluster' }
+          ]
+        },
+        {
           text: '开发',
           collapsed: false,
           items: [
@@ -68,6 +76,7 @@ export const zhCNConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
             { text: 'Node', link: '/zh_CN/guide/config-node' },
             { text: 'Open AI', link: '/zh_CN/guide/config-openai' },
             { text: 'Server', link: '/zh_CN/guide/config-server' },
+            { text: 'Site Check', link: '/zh_CN/guide/config-sitecheck' },
             { text: 'Terminal', link: '/zh_CN/guide/config-terminal' },
             { text: 'Webauthn', link: '/zh_CN/guide/config-webauthn' }
           ]
@@ -83,6 +92,7 @@ export const zhCNConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
           text: '附录',
           collapsed: false,
           items: [
+            { text: 'Docker WebSocket 修复', link: '/zh_CN/guide/docker-websocket-fix' },
             { text: 'Nginx 代理示例', link: '/zh_CN/guide/nginx-proxy-example' },
             { text: '重置密码', link: '/zh_CN/guide/reset-password' },
             { text: '开源协议', link: '/zh_CN/guide/license' }

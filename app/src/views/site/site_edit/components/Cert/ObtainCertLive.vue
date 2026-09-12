@@ -2,6 +2,7 @@
 import type { Ref } from 'vue'
 import type { AutoCertOptions } from '@/api/auto_cert'
 import type { CertificateResult } from '@/api/cert'
+import use2FAModal from '@/components/TwoFA/use2FAModal'
 import { useWebSocket } from '@/lib/websocket'
 import { useSiteEditorStore } from '../SiteEditor/store'
 
@@ -14,6 +15,7 @@ const modalClosable = defineModel<boolean>('modalClosable')
 
 const editorStore = useSiteEditorStore()
 const { issuingCert } = storeToRefs(editorStore)
+const otpModal = use2FAModal()
 
 const progressStrokeColor = {
   from: '#108ee9',
@@ -36,6 +38,8 @@ function log(msg: string) {
 }
 
 async function issue_cert(config_name: string, server_name: string[], key_type: string) {
+  const secureSessionId = await otpModal.open()
+
   return new Promise<CertificateResult>((resolve, reject) => {
     progressStatus.value = 'active'
     modalClosable.value = false
@@ -45,8 +49,24 @@ async function issue_cert(config_name: string, server_name: string[], key_type: 
 
     log($gettext('Getting the certificate, please wait...'))
 
-    const { ws } = useWebSocket(`/api/domain/${config_name}/cert`, false)
+    const { ws } = useWebSocket(`/api/domain/${config_name}/cert`, false, undefined, {
+      'X-Secure-Session-ID': secureSessionId,
+    })
     const socket = ws.value!
+    let isSettled = false
+
+    function fail(message?: string) {
+      if (isSettled)
+        return
+
+      isSettled = true
+      if (message)
+        log(message)
+      modalClosable.value = true
+      progressStatus.value = 'exception'
+      issuingCert.value = false
+      reject($gettext('Fail to obtain certificate'))
+    }
 
     socket.onopen = () => {
       socket.send(JSON.stringify({
@@ -67,19 +87,19 @@ async function issue_cert(config_name: string, server_name: string[], key_type: 
           issuingCert.value = false
 
           if (r.ssl_certificate !== undefined && r.ssl_certificate_key !== undefined) {
+            isSettled = true
             progressStatus.value = 'success'
             progressPercent.value = 100
             resolve({
               ssl_certificate: r.ssl_certificate,
               ssl_certificate_key: r.ssl_certificate_key,
               key_type: r.key_type,
+              profile: r.profile,
             })
           }
           break
         case 'error':
-          modalClosable.value = true
-          progressStatus.value = 'exception'
-          reject($gettext('Fail to obtain certificate'))
+          fail()
           break
         default:
           // If it is a nginx ui log, increase the percent.
@@ -87,6 +107,14 @@ async function issue_cert(config_name: string, server_name: string[], key_type: 
             progressPercent.value += 8
           break
       }
+    }
+
+    socket.onerror = () => {
+      fail($gettext('Certificate issuance connection closed before completion.'))
+    }
+
+    socket.onclose = () => {
+      fail($gettext('Certificate issuance connection closed before completion.'))
     }
   })
 }

@@ -3,8 +3,8 @@ package upgrader
 import (
 	"os"
 
+	"github.com/0xJacky/Nginx-UI/internal/helper"
 	"github.com/0xJacky/Nginx-UI/settings"
-	"github.com/gorilla/websocket"
 	"github.com/uozi-tech/cosy/logger"
 )
 
@@ -15,7 +15,7 @@ type Control struct {
 }
 
 // BinaryUpgrade Upgrade the binary
-func BinaryUpgrade(ws *websocket.Conn, control *Control) {
+func BinaryUpgrade(ws *helper.SafeWebSocketWriter, control *Control) {
 	_ = ws.WriteJSON(CoreUpgradeResp{
 		Status:  UpgradeStatusInfo,
 		Message: "Initialing core upgrader",
@@ -76,6 +76,7 @@ func BinaryUpgrade(ws *websocket.Conn, control *Control) {
 	defer func() {
 		_ = os.Remove(tarName)
 		_ = os.Remove(tarName + ".digest")
+		_ = os.Remove(tarName + ".minisig")
 	}()
 	_ = ws.WriteJSON(CoreUpgradeResp{
 		Status:  UpgradeStatusInfo,

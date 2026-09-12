@@ -29,6 +29,14 @@ export const zhTWConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
           ]
         },
         {
+          text: '部署指南',
+          collapsed: false,
+          items: [
+            { text: '在 Docker 中管理宿主機 Nginx', link: '/zh_TW/guide/manage-host-nginx-from-docker' },
+            { text: '使用叢集節點管理多主機 Nginx', link: '/zh_TW/guide/manage-multi-host-nginx-with-cluster' }
+          ]
+        },
+        {
           text: '開發',
           collapsed: false,
           items: [
@@ -68,6 +76,7 @@ export const zhTWConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
             { text: 'Node', link: '/zh_TW/guide/config-node' },
             { text: 'Open AI', link: '/zh_TW/guide/config-openai' },
             { text: 'Server', link: '/zh_TW/guide/config-server' },
+            { text: 'Site Check', link: '/zh_TW/guide/config-sitecheck' },
             { text: 'Terminal', link: '/zh_TW/guide/config-terminal' },
             { text: 'Webauthn', link: '/zh_TW/guide/config-webauthn' }
           ]
@@ -83,6 +92,7 @@ export const zhTWConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
           text: '附錄',
           collapsed: false,
           items: [
+            { text: 'Docker WebSocket 修復', link: '/zh_TW/guide/docker-websocket-fix' },
             { text: 'Nginx 代理示例', link: '/zh_TW/guide/nginx-proxy-example' },
             { text: '重置密碼', link: '/zh_TW/guide/reset-password' },
             { text: '開源協議', link: '/zh_TW/guide/license' }

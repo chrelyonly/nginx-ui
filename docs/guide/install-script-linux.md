@@ -58,6 +58,11 @@ If there is a port conflict, please modify `/usr/local/etc/nginx-ui/app.ini` man
 then use `systemctl restart nginx-ui` to restart the Nginx UI service.
 For more information, please check [reference for config](./config-server).
 
+After the service starts for the first time, the script prints a one-time install secret for the web setup.
+If you miss the terminal output, read the hidden file `.install_secret` in the config directory.
+By default, this file is located at `/usr/local/etc/nginx-ui/.install_secret`.
+If you override `DATA_PATH`, read `$DATA_PATH/.install_secret` instead.
+
 
 ## Remove
 
@@ -167,6 +172,38 @@ rc-service nginx-ui status
 
 ```shell [Enable at Boot]
 rc-update add nginx-ui default
+```
+
+:::
+
+### OpenWrt
+
+If your system uses OpenWrt init scripts, please use the following `/etc/init.d` commands to control it:
+
+::: code-group
+
+```shell [Start]
+/etc/init.d/nginx-ui start
+```
+
+```shell [Stop]
+/etc/init.d/nginx-ui stop
+```
+
+```shell [Restart]
+/etc/init.d/nginx-ui restart
+```
+
+```shell [Show Status]
+/etc/init.d/nginx-ui status
+```
+
+```shell [Enable at Boot]
+/etc/init.d/nginx-ui enable
+```
+
+```shell [Disable at Boot]
+/etc/init.d/nginx-ui disable
 ```
 
 :::

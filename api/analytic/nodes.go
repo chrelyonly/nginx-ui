@@ -1,12 +1,12 @@
 package analytic
 
 import (
-	"net/http"
 	"time"
 
 	"github.com/0xJacky/Nginx-UI/internal/analytic"
 	"github.com/0xJacky/Nginx-UI/internal/helper"
 	"github.com/0xJacky/Nginx-UI/internal/kernel"
+	"github.com/0xJacky/Nginx-UI/internal/middleware"
 	"github.com/0xJacky/Nginx-UI/internal/version"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -16,9 +16,7 @@ import (
 
 func GetNodeStat(c *gin.Context) {
 	var upGrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
+		CheckOrigin: middleware.CheckWebSocketOrigin,
 	}
 	// upgrade http to websocket
 	ws, err := upGrader.Upgrade(c.Writer, c.Request, nil)
@@ -28,6 +26,8 @@ func GetNodeStat(c *gin.Context) {
 	}
 
 	defer ws.Close()
+
+	peerGone := startWSKeepalive(ws)
 
 	// Counter to track iterations for periodic full info update
 	counter := 0
@@ -72,6 +72,7 @@ func GetNodeStat(c *gin.Context) {
 		}
 
 		// write
+		_ = ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
 		err = ws.WriteJSON(data)
 		if err != nil {
 			if helper.IsUnexpectedWebsocketError(err) {
@@ -86,6 +87,9 @@ func GetNodeStat(c *gin.Context) {
 		case <-kernel.Context.Done():
 			logger.Debug("GetNodeStat: Context cancelled, closing WebSocket")
 			return
+		case <-peerGone:
+			logger.Debug("GetNodeStat: peer disconnected, closing WebSocket")
+			return
 		case <-time.After(10 * time.Second):
 		}
 	}
@@ -93,9 +97,7 @@ func GetNodeStat(c *gin.Context) {
 
 func GetNodesAnalytic(c *gin.Context) {
 	var upGrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
+		CheckOrigin: middleware.CheckWebSocketOrigin,
 	}
 	// upgrade http to websocket
 	ws, err := upGrader.Upgrade(c.Writer, c.Request, nil)
@@ -106,9 +108,12 @@ func GetNodesAnalytic(c *gin.Context) {
 
 	defer ws.Close()
 
+	peerGone := startWSKeepalive(ws)
+
 	for {
 		// Send snapshot of NodeMap data to client to avoid concurrent access
 		nodeSnapshot := analytic.SnapshotNodeMap()
+		_ = ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
 		err = ws.WriteJSON(nodeSnapshot)
 		if err != nil {
 			if helper.IsUnexpectedWebsocketError(err) {
@@ -120,6 +125,9 @@ func GetNodesAnalytic(c *gin.Context) {
 		select {
 		case <-kernel.Context.Done():
 			logger.Debug("GetNodesAnalytic: Context cancelled, closing WebSocket")
+			return
+		case <-peerGone:
+			logger.Debug("GetNodesAnalytic: peer disconnected, closing WebSocket")
 			return
 		case <-time.After(10 * time.Second):
 		}

@@ -25,7 +25,7 @@ func (s *service) GetGeoDistribution(ctx context.Context, req *GeoQueryRequest) 
 		EndTime:        &req.EndTime,
 		LogPaths:       req.LogPaths,
 		UseMainLogPath: req.UseMainLogPath, // Use main_log_path field for efficient queries
-		Limit:          0,                  // We only need facets.
+		Limit:          -1,                 // Facet-only query, no documents needed
 		IncludeFacets:  true,
 		FacetFields:    []string{"region_code"},
 		FacetSize:      300, // Large enough to cover all countries
@@ -91,9 +91,9 @@ func (s *service) GetGeoDistributionByCountry(ctx context.Context, req *GeoQuery
 		StartTime:      &req.StartTime,
 		EndTime:        &req.EndTime,
 		LogPaths:       req.LogPaths,
-		UseMainLogPath: req.UseMainLogPath, // Use main_log_path field for efficient queries
+		UseMainLogPath: req.UseMainLogPath,    // Use main_log_path field for efficient queries
 		Countries:      []string{countryCode}, // Use proper country filter instead of text query
-		Limit:          0, // We only need facets.
+		Limit:          -1,                    // Facet-only query, no documents needed
 		IncludeFacets:  true,
 		FacetFields:    []string{"province"},
 		FacetSize:      100, // Large enough to cover all provinces in a country
@@ -137,6 +137,48 @@ func (s *service) GetGeoDistributionByCountry(ctx context.Context, req *GeoQuery
 	return dist, nil
 }
 
+func (s *service) GetGeoDistributionByProvince(ctx context.Context, req *GeoQueryRequest, countryCode, province string) (*GeoDistribution, error) {
+	if req == nil {
+		return nil, fmt.Errorf("request cannot be nil")
+	}
+
+	if err := s.ValidateTimeRange(req.StartTime, req.EndTime); err != nil {
+		return nil, fmt.Errorf("invalid time range: %w", err)
+	}
+
+	searchReq := &searcher.SearchRequest{
+		StartTime:      &req.StartTime,
+		EndTime:        &req.EndTime,
+		LogPaths:       req.LogPaths,
+		UseMainLogPath: req.UseMainLogPath,
+		Countries:      []string{countryCode},
+		Provinces:      []string{province},
+		Limit:          -1, // Facet-only query, no documents needed
+		IncludeFacets:  true,
+		FacetFields:    []string{"city"},
+		FacetSize:      100, // Large enough to cover all cities in a province
+		UseCache:       true,
+	}
+
+	result, err := s.searcher.Search(ctx, searchReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get geo distribution by province: %w", err)
+	}
+
+	dist := &GeoDistribution{
+		Countries: make(map[string]int), // Reusing 'Countries' map for cities
+	}
+	if result.Facets != nil {
+		if cityFacet, ok := result.Facets["city"]; ok {
+			for _, term := range cityFacet.Terms {
+				dist.Countries[term.Term] = term.Count
+			}
+		}
+	}
+
+	return dist, nil
+}
+
 func (s *service) GetTopCountries(ctx context.Context, req *GeoQueryRequest) ([]CountryStats, error) {
 	if req == nil {
 		return nil, fmt.Errorf("request cannot be nil")
@@ -151,7 +193,7 @@ func (s *service) GetTopCountries(ctx context.Context, req *GeoQueryRequest) ([]
 		EndTime:        &req.EndTime,
 		LogPaths:       req.LogPaths,
 		UseMainLogPath: req.UseMainLogPath, // Use main_log_path field for efficient queries
-		Limit:          0, // We only need facets
+		Limit:          -1,                 // Facet-only query, no documents needed
 		IncludeFacets:  true,
 		FacetFields:    []string{"region_code"},
 		FacetSize:      req.Limit, // Use the requested limit for facet size
@@ -176,108 +218,5 @@ func (s *service) GetTopCountries(ctx context.Context, req *GeoQueryRequest) ([]
 	}
 
 	// Facets are already sorted by count descending from bleve
-	return stats, nil
-}
-
-func (s *service) GetTopCities(ctx context.Context, req *GeoQueryRequest) ([]CityStats, error) {
-	if req == nil {
-		return nil, fmt.Errorf("request cannot be nil")
-	}
-
-	if err := s.ValidateTimeRange(req.StartTime, req.EndTime); err != nil {
-		return nil, fmt.Errorf("invalid time range: %w", err)
-	}
-
-	searchReq := &searcher.SearchRequest{
-		StartTime:      &req.StartTime,
-		EndTime:        &req.EndTime,
-		LogPaths:       req.LogPaths,
-		UseMainLogPath: req.UseMainLogPath, // Use main_log_path field for efficient queries
-		Limit:          0, // We only need facets
-		IncludeFacets:  true,
-		FacetFields:    []string{"city"},
-		FacetSize:      req.Limit,
-		UseCache:       true,
-	}
-
-	result, err := s.searcher.Search(ctx, searchReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get top cities: %w", err)
-	}
-
-	var stats []CityStats
-	if result.Facets != nil {
-		if cityFacet, ok := result.Facets["city"]; ok {
-			totalHits := int(result.TotalHits)
-			for _, term := range cityFacet.Terms {
-				percent := float64(term.Count) / float64(totalHits) * 100
-				stats = append(stats, CityStats{
-					City:    term.Term,
-					Count:   term.Count,
-					Percent: percent,
-				})
-			}
-		}
-	}
-
-	return stats, nil
-}
-
-func (s *service) GetGeoStatsForIP(ctx context.Context, req *GeoQueryRequest, ip string) (*CityStats, error) {
-	if req == nil {
-		return nil, fmt.Errorf("request cannot be nil")
-	}
-
-	if ip == "" {
-		return nil, fmt.Errorf("IP address cannot be empty")
-	}
-
-	if err := s.ValidateTimeRange(req.StartTime, req.EndTime); err != nil {
-		return nil, fmt.Errorf("invalid time range: %w", err)
-	}
-
-	searchReq := &searcher.SearchRequest{
-		StartTime:      &req.StartTime,
-		EndTime:        &req.EndTime,
-		LogPaths:       req.LogPaths,
-		UseMainLogPath: req.UseMainLogPath, // Use main_log_path field for efficient queries
-		Limit:          0,
-		IncludeFacets:  true,
-		FacetFields:    []string{"country", "country_code", "city"},
-		FacetSize:      10,
-		Query:          fmt.Sprintf(`ip:"%s"`, ip),
-		UseCache:       true,
-	}
-
-	result, err := s.searcher.Search(ctx, searchReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get geo stats for IP: %w", err)
-	}
-
-	if result.TotalHits == 0 {
-		return nil, fmt.Errorf("no data found for IP %s", ip)
-	}
-
-	if result.Facets == nil {
-		return nil, fmt.Errorf("could not extract geo information for IP %s", ip)
-	}
-
-	stats := &CityStats{
-		Count:   int(result.TotalHits),
-		Percent: 100.0, // 100% for single IP
-	}
-
-	if countryFacet, ok := result.Facets["country"]; ok && len(countryFacet.Terms) > 0 {
-		stats.Country = countryFacet.Terms[0].Term
-	}
-
-	if countryCodeFacet, ok := result.Facets["country_code"]; ok && len(countryCodeFacet.Terms) > 0 {
-		stats.CountryCode = countryCodeFacet.Terms[0].Term
-	}
-
-	if cityFacet, ok := result.Facets["city"]; ok && len(cityFacet.Terms) > 0 {
-		stats.City = cityFacet.Terms[0].Term
-	}
-
 	return stats, nil
 }

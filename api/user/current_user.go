@@ -4,11 +4,24 @@ import (
 	"net/http"
 
 	"github.com/0xJacky/Nginx-UI/api"
+	internalUser "github.com/0xJacky/Nginx-UI/internal/user"
 	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/gin-gonic/gin"
 	"github.com/uozi-tech/cosy"
 	"golang.org/x/crypto/bcrypt"
 )
+
+func verifyCurrentPassword(c *gin.Context, password string) bool {
+	user := api.CurrentUser(c)
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"message": "Current password is invalid",
+		})
+		return false
+	}
+
+	return true
+}
 
 func GetCurrentUser(c *gin.Context) {
 	user := api.CurrentUser(c)
@@ -33,6 +46,7 @@ func UpdateCurrentUser(c *gin.Context) {
 				return
 			}
 
+			internalUser.InvalidateUserCache(user.ID)
 			c.JSON(http.StatusOK, user)
 		})
 }
@@ -48,8 +62,7 @@ func UpdateCurrentUserPassword(c *gin.Context) {
 	}
 
 	user := api.CurrentUser(c)
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(json.OldPassword)); err != nil {
-		cosy.ErrHandler(c, err)
+	if !verifyCurrentPassword(c, json.OldPassword) {
 		return
 	}
 
@@ -70,6 +83,7 @@ func UpdateCurrentUserPassword(c *gin.Context) {
 		return
 	}
 
+	internalUser.DeleteUserTokens(user.ID)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "ok",
 	})
@@ -96,6 +110,7 @@ func UpdateCurrentUserLanguage(c *gin.Context) {
 		return
 	}
 
+	internalUser.InvalidateUserCache(user.ID)
 	c.JSON(http.StatusOK, gin.H{
 		"language": json.Language,
 	})

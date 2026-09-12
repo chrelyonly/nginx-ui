@@ -1,6 +1,7 @@
 package analytic
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/0xJacky/Nginx-UI/internal/transport"
+	"github.com/0xJacky/Nginx-UI/internal/nodeauth"
 	"github.com/0xJacky/Nginx-UI/internal/upstream"
 	"github.com/0xJacky/Nginx-UI/internal/version"
 	"github.com/0xJacky/Nginx-UI/model"
@@ -37,10 +38,17 @@ type NodeStat struct {
 	UpstreamStatusMap map[string]*upstream.Status `json:"upstream_status_map"`
 }
 
+type NodeConnectionErrorCode string
+
+const NodeConnectionErrorClockSkew NodeConnectionErrorCode = "clock_skew"
+
 type Node struct {
 	*model.Node
 	NodeStat
 	NodeInfo
+	ConnectionError     string                  `json:"connection_error,omitempty"`
+	ConnectionErrorCode NodeConnectionErrorCode `json:"connection_error_code,omitempty"`
+	ConnectionErrorAt   *time.Time              `json:"connection_error_at,omitempty"`
 }
 
 var nodeMapMu sync.RWMutex
@@ -123,7 +131,7 @@ func GetNode(node *model.Node) (n *Node) {
 	return cloned
 }
 
-func InitNode(node *model.Node) (n *Node, err error) {
+func InitNode(ctx context.Context, node *model.Node) (n *Node, err error) {
 	n = &Node{
 		Node: node,
 	}
@@ -133,20 +141,15 @@ func InitNode(node *model.Node) (n *Node, err error) {
 		return
 	}
 
-	t, err := transport.NewTransport()
-	if err != nil {
-		return
-	}
-	client := http.Client{
-		Transport: t,
-	}
-
-	req, err := http.NewRequest("GET", u, nil)
+	client, err := nodeauth.NewHTTPClient(node, 10*time.Second)
 	if err != nil {
 		return
 	}
 
-	req.Header.Set("X-Node-Secret", node.Token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -154,13 +157,12 @@ func InitNode(node *model.Node) (n *Node, err error) {
 	}
 
 	defer resp.Body.Close()
-	bytes, _ := io.ReadAll(resp.Body)
-
 	if resp.StatusCode != http.StatusOK {
-		return n, cosy.WrapErrorWithParams(ErrNodeAnalyticsFailed, string(bytes))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return n, cosy.WrapErrorWithParams(ErrNodeAnalyticsFailed, resp.Status)
 	}
 
-	err = json.Unmarshal(bytes, &n.NodeInfo)
+	err = json.NewDecoder(resp.Body).Decode(&n.NodeInfo)
 	if err != nil {
 		return
 	}

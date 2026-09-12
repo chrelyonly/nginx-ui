@@ -1,8 +1,10 @@
+import type { HttpConfig } from '@/lib/http/types'
 import { http } from '@uozi-admin/request'
 
 export interface NgxConfig {
   file_name?: string
   name: string
+  root_block?: 'http' | 'stream'
   upstreams?: NgxUpstream[]
   servers: NgxServer[]
   custom?: string
@@ -111,6 +113,51 @@ export interface NgxModule {
   loaded: boolean
 }
 
+export interface NgxTestResult {
+  message: string
+  level: number
+  namespace_id?: number
+  site_count?: number
+  stream_count?: number
+  test_scope?: 'global' | 'namespace_sandbox'
+  sandbox_status?: 'ok' | 'skipped' | 'failed'
+  sandbox_reason?: 'remote_namespace' | 'separate_container' | 'custom_test_command'
+  error_category?: 'missing_include' | 'sandbox_build_error' | 'syntax_error' | 'nginx_runtime_error'
+}
+
+export type NginxControlOperationState = 'running' | 'succeeded' | 'failed'
+
+export interface NginxControlOperation {
+  id: string
+  action: 'restart' | 'reload'
+  state: NginxControlOperationState
+  started_at: string
+  finished_at?: string
+  message?: string
+  level: number
+  exit_code?: number
+}
+
+export interface NginxStatusResponse {
+  running: boolean
+  message: string
+  level: number
+  control?: NginxControlOperation
+}
+
+export interface NginxPerformanceResponse {
+  running: boolean
+  stub_status_enabled: boolean
+  info: NginxPerformanceInfo
+  error?: string
+  message?: string
+}
+
+export interface NginxRestartResponse {
+  message: string
+  control: NginxControlOperation
+}
+
 const ngx = {
   build_config(ngxConfig: NgxConfig) {
     return http.post('/ngx/build_config', ngxConfig)
@@ -124,11 +171,11 @@ const ngx = {
     return http.post('/ngx/format_code', { content })
   },
 
-  status(): Promise<{ running: boolean, message: string, level: number }> {
-    return http.get('/nginx/status')
+  status(config?: HttpConfig): Promise<NginxStatusResponse> {
+    return http.get('/nginx/status', config)
   },
 
-  detail_status(): Promise<{ running: boolean, stub_status_enabled: boolean, info: NginxPerformanceInfo }> {
+  detail_status(): Promise<NginxPerformanceResponse> {
     return http.get('/nginx/detail_status')
   },
 
@@ -140,15 +187,15 @@ const ngx = {
     return http.post('/nginx/reload')
   },
 
-  restart() {
-    return http.post('/nginx/restart')
+  restart(operationId: string, config?: HttpConfig): Promise<NginxRestartResponse> {
+    return http.post('/nginx/restart', { operation_id: operationId }, config)
   },
 
-  test() {
+  test(): Promise<NgxTestResult> {
     return http.post('/nginx/test')
   },
 
-  test_namespace(namespace_id?: number): Promise<{ message: string, level: number, namespace_id?: number }> {
+  test_namespace(namespace_id?: number): Promise<NgxTestResult> {
     return http.post('/nginx/test_namespace', { namespace_id })
   },
 

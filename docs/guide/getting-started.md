@@ -36,6 +36,9 @@ We provide several installation methods to suit different needs:
 - **Windows**: Use [Winget](./install-winget) for Windows package management
 - **Linux**: Use the [installation script](./install-script-linux) to directly control the host machine's Nginx
 - **Docker**: [Install via Docker](#install-with-docker) with our bundled image that includes Nginx
+- **Kubernetes**: Use the [official Helm chart](./install-kubernetes) with persistent volumes
+- **OpenWrt 25.12+**: Use the [self-hosted signed APK repository](./install-openwrt)
+- **Unraid**: Use the [official standalone or SWAG Community Applications template](./install-unraid)
 - **Advanced**: Download from [latest release](https://github.com/0xJacky/nginx-ui/releases/latest) and [run executable directly](#run-executable-directly), or [manually build it](./build)
 
 In the first runtime of Nginx UI, please visit `http://<your_server_ip>:<listen_port>`
@@ -43,6 +46,21 @@ in your browser to complete the follow-up configurations.
 
 In addition, we provide [an example](./nginx-proxy-example) of using Nginx to reverse proxy Nginx UI,
 which can be used after installation is complete.
+
+### Getting the Install Secret
+
+Before the web setup can continue, Nginx UI requires a one-time install secret on first startup.
+The secret is stored in a hidden file named `.install_secret` in the same directory as `app.ini`.
+
+You can obtain it in different ways depending on how you installed Nginx UI:
+
+- **Linux installation script**: The script prints the secret after the service starts. If you miss it, read `$DATA_PATH/.install_secret` (default: `/usr/local/etc/nginx-ui/.install_secret`).
+- **Homebrew**: Read `.install_secret` from the same directory as `app.ini`, such as `/opt/homebrew/etc/nginx-ui/.install_secret`, `/usr/local/etc/nginx-ui/.install_secret`, or `/home/linuxbrew/.linuxbrew/etc/nginx-ui/.install_secret`.
+- **Docker / Docker Compose**: Read `.install_secret` from the host directory mounted to `/etc/nginx-ui`. If you did not mount that directory, run `docker exec <container_name> cat /etc/nginx-ui/.install_secret`.
+- **Winget**: Read `.install_secret` from the same directory as `app.ini`, typically `%LOCALAPPDATA%\nginx-ui\.install_secret` or `C:\ProgramData\nginx-ui\.install_secret`.
+- **Run executable directly / manual build**: Read `.install_secret` from the same directory as the config file you pass to `-config`.
+
+The secret is only valid during the first-run setup window and will be removed after setup completes or expires.
 
 ## Install with Homebrew
 
@@ -113,7 +131,9 @@ you can easily make the switch.
 
 ::: tip
 
-Nginx UI is by default proxied to port `8080` of the container.
+The official Docker image listens on container ports `80` and `443`.
+Requests to container port `80` are reverse proxied to the Nginx UI backend at `127.0.0.1:9000`.
+Access Nginx UI through the host port that you publish to container port `80`.
 When using this container for the first time, ensure that the volume mapped to `/etc/nginx` is empty.
 If you want to host static files, you can map directories to container.
 

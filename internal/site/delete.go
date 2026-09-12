@@ -3,21 +3,32 @@ package site
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"runtime"
 
-	"github.com/0xJacky/Nginx-UI/internal/helper"
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
+	"github.com/0xJacky/Nginx-UI/internal/nodeauth"
 	"github.com/0xJacky/Nginx-UI/internal/notification"
 	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/0xJacky/Nginx-UI/query"
-	"github.com/go-resty/resty/v2"
 	"github.com/uozi-tech/cosy/logger"
 )
 
 // Delete deletes a site by removing the file in sites-available
 func Delete(name string) (err error) {
-	availablePath := nginx.GetConfPath("sites-available", name)
+	availablePath, err := ResolveAvailablePath(name)
+	if err != nil {
+		return err
+	}
+
+	// Remote namespaces keep the enablement flag in the database, so refuse the
+	// deletion the same way an enabled local site is refused.
+	if IsRemoteDeploy(name) {
+		s := query.Site
+		siteModel, err := s.Where(s.Path.Eq(availablePath)).First()
+		if err == nil && siteModel.RemoteEnabled {
+			return ErrSiteIsEnabled
+		}
+	}
 
 	syncDelete(name)
 
@@ -27,25 +38,44 @@ func Delete(name string) (err error) {
 		return
 	}
 
-	enabledPath := nginx.GetConfPath("sites-enabled", name)
-	maintenancePath := nginx.GetConfPath("sites-available", name+MaintenanceSuffix)
+	enabledPath, err := ResolveEnabledPath(name)
+	if err != nil {
+		return err
+	}
 
-	if !helper.FileExists(availablePath) {
+	maintenancePath, err := ResolveAvailablePath(name + MaintenanceSuffix)
+	if err != nil {
+		return err
+	}
+
+	availableExists, err := nginx.Exists(availablePath)
+	if err != nil {
+		return err
+	}
+	if !availableExists {
 		return ErrSiteNotFound
 	}
 
-	if helper.FileExists(enabledPath) {
+	enabledExists, err := nginx.Exists(enabledPath)
+	if err != nil {
+		return err
+	}
+	if enabledExists {
 		return ErrSiteIsEnabled
 	}
 
-	if helper.FileExists(maintenancePath) {
+	maintenanceExists, err := nginx.Exists(maintenancePath)
+	if err != nil {
+		return err
+	}
+	if maintenanceExists {
 		return ErrSiteIsInMaintenance
 	}
 
 	certModel := model.Cert{Filename: name}
 	_ = certModel.Remove()
 
-	err = os.Remove(availablePath)
+	err = nginx.Remove(availablePath)
 	if err != nil {
 		return
 	}
@@ -65,10 +95,9 @@ func syncDelete(name string) {
 					logger.Errorf("%s\n%s", err, buf)
 				}
 			}()
-			client := resty.New()
+			client := nodeauth.NewRestyClient(node)
 			client.SetBaseURL(node.URL)
 			resp, err := client.R().
-				SetHeader("X-Node-Secret", node.Token).
 				Delete(fmt.Sprintf("/api/sites/%s", name))
 			if err != nil {
 				notification.Error("Delete Remote Site Error", err.Error(), nil)

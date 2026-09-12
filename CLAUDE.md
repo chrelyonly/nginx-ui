@@ -3,8 +3,8 @@
 This project is a web-based NGINX management interface built with Go backend and Vue.js frontend.
 
 ## Package Manager
-- **Use pnpm exclusively** for all frontend package management operations
-- Commands: `pnpm install`, `pnpm run dev`, `pnpm typecheck`
+- **Use Bun exclusively** for all frontend package management operations
+- Commands: `bun install`, `bun run dev`, `bun run typecheck`
 
 ## Backend (Go) Development
 
@@ -28,7 +28,8 @@ This project is a web-based NGINX management interface built with Go backend and
 - Follow Cosy Error Handler best practices for error management
 - Implement standardized CRUD operations using Cosy framework
 - Apply efficient database pagination for large datasets
-- Validate changes with `go test ./... -race -cover` before pushing
+- Before committing backend changes, run the CI-equivalent unit test command: `GOWORK=off go test -tags=unembed -race -cover -count=1 ./...`
+- Keep `-count=1` in pre-commit unit tests so cached results cannot hide race conditions or flaky failures
 - Keep files modular and well-organized by functionality
 - **All comments and documentation must be in English**
 
@@ -41,7 +42,7 @@ This project is a web-based NGINX management interface built with Go backend and
 - **Vue Router** for routing
 - **Pinia** for state management
 - **VueUse** for utilities
-- **Ant Design Vue** for UI components
+- **antdv-next** for UI components (migrated from `ant-design-vue@4`; the icon package is `@antdv-next/icons`)
 - **UnoCSS** for styling
 
 ### Code Standards
@@ -58,9 +59,11 @@ This project is a web-based NGINX management interface built with Go backend and
 - **Exports**: Favor named exports for functions
 
 ### UI & Styling
-- Use Ant Design Vue components and UnoCSS for styling
+- Use antdv-next components and UnoCSS for styling
+- Always check dark mode when adding or changing styles
+- Prefer a component's semantic `classes` / `styles` props over `:deep(.ant-*)` overrides; antdv-next owns its internal DOM and changes it between versions
 - Implement responsive design with mobile-first approach
-- Use Antdv Flex layout for responsive layouts
+- Use antdv-next Flex layout for responsive layouts
 
 ### Performance Optimization
 - Leverage VueUse functions for enhanced reactivity
@@ -72,12 +75,26 @@ This project is a web-based NGINX management interface built with Go backend and
 
 ### Code Quality
 - **Always use ESLint MCP after generating frontend code** to ensure code quality and consistency
-- Run `pnpm lint`, `pnpm lint:fix`, and `pnpm typecheck` to keep style and typings aligned
+- Run `bun run lint`, `bun run lint:fix`, and `bun run typecheck` to keep style and typings aligned
 
 ## Development Commands
-- **Frontend**: `pnpm run dev`, `pnpm lint`, `pnpm typecheck`, `pnpm run build`
-- **Backend**: `go generate ./...`, `go build ./...`, run `go test ./... -race -cover`; for release artifacts reuse the README command with `-tags=jsoniter -ldflags "$LD_FLAGS ..."`.
+- **Frontend**: `bun run dev`, `bun run lint`, `bun run typecheck`, `bun run build`
+- **Backend**: `go generate ./...`, `go build ./...`, run `GOWORK=off go test -tags=unembed -race -cover -count=1 ./...`; for release artifacts reuse the README command with `-tags=jsoniter -ldflags "$LD_FLAGS ..."`.
 - **Demo stack**: `docker-compose -f docker-compose-demo.yml up` to bootstrap the sample environment
+
+
+## Release Workflow
+- Start releases from the `dev` branch with a clean working tree.
+- Run `./version.sh` outside the sandbox to update the version, rebuild the frontend, and refresh generated artifacts that require network access.
+- Prepare release notes in a temporary local markdown file such as `release-notes-vX.Y.Z.md`.
+- Follow the existing three-section release note style: `Features`, `Bug Fixes`, and `Contributors`.
+- Write contributor names using GitHub handles when they are known from the merged PR, not raw git author names.
+- Do not commit the release note markdown file. Keep it untracked and use it directly for the tag annotation and GitHub Release body.
+- Commit only the version-preparation artifacts with `chore: prepare vX.Y.Z`.
+- Create an annotated tag from the release note file. If local GPG signing blocks tag creation in the sandbox, create the tag outside the sandbox with `git -c tag.gpgSign=false tag -a vX.Y.Z -F release-notes-vX.Y.Z.md`.
+- Push both `dev` and the release tag with `git push origin dev vX.Y.Z`.
+- Publish the release with `gh release create vX.Y.Z --verify-tag --title vX.Y.Z -F release-notes-vX.Y.Z.md --discussion-category Announcements`.
+- The release flow is expected to create the GitHub Release and the linked Discussion post, then GitHub Actions handles binary, Docker, Homebrew, WinGet, and branch-sync automation.
 
 ## Language Requirements
 - **All code comments, documentation, and communication must be in English**

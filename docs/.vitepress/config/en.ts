@@ -20,7 +20,18 @@ export const enConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Install with Homebrew', link: '/guide/install-homebrew' },
             { text: 'Install with Winget', link: '/guide/install-winget' },
-            { text: 'Install Script', link: '/guide/install-script-linux' }
+            { text: 'Install Script', link: '/guide/install-script-linux' },
+            { text: 'Install on Kubernetes', link: '/guide/install-kubernetes' },
+            { text: 'Install on OpenWrt', link: '/guide/install-openwrt' },
+            { text: 'Install on Unraid', link: '/guide/install-unraid' }
+          ]
+        },
+        {
+          text: 'Deployment',
+          collapsed: false,
+          items: [
+            { text: 'Manage Host Nginx from Docker', link: '/guide/manage-host-nginx-from-docker' },
+            { text: 'Manage Multi-Host Nginx with Cluster', link: '/guide/manage-multi-host-nginx-with-cluster' }
           ]
         },
         {
@@ -45,6 +56,13 @@ export const enConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
           ]
         },
         {
+          text: 'Automation',
+          collapsed: false,
+          items: [
+            { text: 'Command Line Interface', link: '/guide/cli' },
+          ]
+        },
+        {
           text: 'Configuration',
           collapsed: false,
           items: [
@@ -63,6 +81,7 @@ export const enConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
             { text: 'Node', link: '/guide/config-node' },
             { text: 'Open AI', link: '/guide/config-openai' },
             { text: 'Server', link: '/guide/config-server' },
+            { text: 'Site Check', link: '/guide/config-sitecheck' },
             { text: 'Terminal', link: '/guide/config-terminal' },
             { text: 'Webauthn', link: '/guide/config-webauthn' }
           ]
@@ -78,6 +97,7 @@ export const enConfig: LocaleSpecificConfig<DefaultTheme.Config> = {
           text: 'Appendix',
           collapsed: false,
           items: [
+            { text: 'Docker WebSocket Fix', link: '/guide/docker-websocket-fix' },
             { text: 'Nginx Proxy Example', link: '/guide/nginx-proxy-example' },
             { text: 'Reset Password', link: '/guide/reset-password' },
             { text: 'License', link: '/guide/license' }

@@ -1,14 +1,19 @@
 <script setup lang="ts">
-import { LockOutlined, MailOutlined, UserOutlined } from '@ant-design/icons-vue'
-import { Form } from 'ant-design-vue'
+import type { FormInstance } from 'antdv-next'
+import { LockOutlined, MailOutlined, UserOutlined } from '@antdv-next/icons'
 import install from '@/api/install'
 
+const props = defineProps<{
+  installSecret: string
+  frontendDebug?: boolean
+}>()
 const emit = defineEmits<{
   (e: 'installSuccess'): void
 }>()
 const { message } = useGlobalApp()
 
 const router = useRouter()
+const formRef = ref<FormInstance>()
 const loading = ref(false)
 
 const modelRef = reactive({
@@ -21,7 +26,7 @@ const rulesRef = reactive({
   email: [
     {
       required: true,
-      type: 'email',
+      type: 'email' as const,
       message: () => $gettext('Please input your E-mail!'),
     },
   ],
@@ -47,29 +52,38 @@ const rulesRef = reactive({
   ],
 })
 
-const { validate, validateInfos } = Form.useForm(modelRef, rulesRef)
+async function onSubmit() {
+  await formRef.value?.validate()
 
-function onSubmit() {
-  validate().then(() => {
-    loading.value = true
+  loading.value = true
 
-    install.install_nginx_ui(modelRef).then(async () => {
-      message.success($gettext('Install successfully'))
+  try {
+    if (props.frontendDebug) {
+      await new Promise(resolve => setTimeout(resolve, 300))
+      message.success($gettext('Frontend debug mode: install flow completed without sending a backend request'))
       emit('installSuccess')
-      await router.push('/login')
-    }).catch(error => {
-      if (error && error.code === 40308)
-        throw error
-    }).finally(() => {
-      loading.value = false
-    })
-  })
+      return
+    }
+
+    await install.install_nginx_ui(modelRef, props.installSecret)
+    message.success($gettext('Install successfully'))
+    emit('installSuccess')
+    await router.push('/login')
+  }
+  finally {
+    loading.value = false
+  }
 }
 </script>
 
 <template>
-  <AForm id="components-form-install">
-    <AFormItem v-bind="validateInfos.email">
+  <AForm
+    id="components-form-install"
+    ref="formRef"
+    :model="modelRef"
+    :rules="rulesRef"
+  >
+    <AFormItem name="email">
       <AInput
         v-model:value="modelRef.email"
         :placeholder="$gettext('Email (*)')"
@@ -79,7 +93,7 @@ function onSubmit() {
         </template>
       </AInput>
     </AFormItem>
-    <AFormItem v-bind="validateInfos.username">
+    <AFormItem name="username">
       <AInput
         v-model:value="modelRef.username"
         :placeholder="$gettext('Username (*)')"
@@ -89,7 +103,7 @@ function onSubmit() {
         </template>
       </AInput>
     </AFormItem>
-    <AFormItem v-bind="validateInfos.password">
+    <AFormItem name="password">
       <AInputPassword
         v-model:value="modelRef.password"
         :placeholder="$gettext('Password (*)')"

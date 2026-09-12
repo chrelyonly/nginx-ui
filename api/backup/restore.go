@@ -11,15 +11,22 @@ import (
 	"code.pfad.fr/risefront"
 	"github.com/0xJacky/Nginx-UI/internal/backup"
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
+	internalSystem "github.com/0xJacky/Nginx-UI/internal/system"
 	"github.com/gin-gonic/gin"
 	"github.com/uozi-tech/cosy"
 )
 
 // RestoreResponse contains the response data for restore operation
 type RestoreResponse struct {
-	NginxUIRestored bool `json:"nginx_ui_restored"`
-	NginxRestored   bool `json:"nginx_restored"`
-	HashMatch       bool `json:"hash_match"`
+	NginxUIRestored bool                 `json:"nginx_ui_restored"`
+	NginxRestored   bool                 `json:"nginx_restored"`
+	HashMatch       bool                 `json:"hash_match"`
+	TrustLevel      backup.ManifestTrust `json:"trust_level"`
+	SkippedSettings []string             `json:"skipped_protected_settings"`
+}
+
+func uploadedBackupPath(tempDir string) string {
+	return filepath.Join(tempDir, "uploaded-backup.zip")
 }
 
 // RestoreBackup restores from uploaded backup and security info
@@ -74,7 +81,7 @@ func RestoreBackup(c *gin.Context) {
 	defer os.RemoveAll(tempDir)
 
 	// Save backup file
-	backupPath := filepath.Join(tempDir, backupFile.Filename)
+	backupPath := uploadedBackupPath(tempDir)
 	if err := c.SaveUploadedFile(backupFile, backupPath); err != nil {
 		cosy.ErrHandler(c, cosy.WrapErrorWithParams(backup.ErrCreateBackupFile, err.Error()))
 		return
@@ -120,6 +127,11 @@ func RestoreBackup(c *gin.Context) {
 	}
 
 	if restoreNginxUI {
+		if err := internalSystem.ConsumeInstallSecret(); err != nil {
+			cosy.ErrHandler(c, err)
+			return
+		}
+
 		go func() {
 			time.Sleep(2 * time.Second)
 			// gracefully restart
@@ -131,5 +143,7 @@ func RestoreBackup(c *gin.Context) {
 		NginxUIRestored: result.NginxUIRestored,
 		NginxRestored:   result.NginxRestored,
 		HashMatch:       result.HashMatch,
+		TrustLevel:      result.TrustLevel,
+		SkippedSettings: result.SkippedSettings,
 	})
 }

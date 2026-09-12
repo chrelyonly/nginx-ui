@@ -14,8 +14,11 @@ const directiveStore = useDirectiveStore()
 const { curIdx } = storeToRefs(directiveStore)
 
 const ngxDirectives = defineModel<NgxDirective[]>('directives', {
-  default: reactive([]),
+  default: () => [],
 })
+
+const directiveKeys = new WeakMap<NgxDirective, string>()
+let directiveKeySeed = 0
 
 onMounted(() => {
   directiveStore.getNginxDirectivesDocsMap()
@@ -28,6 +31,15 @@ function addDirective(directive: NgxDirective) {
 function removeDirective(index: number) {
   ngxDirectives.value.splice(index, 1)
 }
+
+function getDirectiveKey(directive: NgxDirective) {
+  let key = directiveKeys.get(directive)
+  if (!key) {
+    key = `directive-${directiveKeySeed++}`
+    directiveKeys.set(directive, key)
+  }
+  return key
+}
 </script>
 
 <template>
@@ -36,7 +48,7 @@ function removeDirective(index: number) {
 
     <Draggable
       v-model:list="ngxDirectives"
-      item-key="name"
+      :item-key="getDirectiveKey"
       class="list-group"
       ghost-class="ghost"
       handle=".anticon-holder"

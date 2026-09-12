@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { NgxLocation } from '@/api/ngx'
-import { CopyOutlined, DeleteOutlined, HolderOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, DeleteOutlined, HolderOutlined } from '@antdv-next/icons'
 import { cloneDeep } from 'lodash'
 import Draggable from 'vuedraggable'
 import CodeEditor from '@/components/CodeEditor'
@@ -10,8 +10,11 @@ defineProps<{
 }>()
 
 const locations = defineModel<NgxLocation[]>('locations', {
-  default: reactive([]),
+  default: () => [],
 })
+
+const locationKeys = new WeakMap<NgxLocation, string>()
+let locationKeySeed = 0
 
 const location = reactive({
   comments: '',
@@ -44,6 +47,62 @@ function duplicate(index: number) {
 
   locations.value.splice(index, 0, cloneDeep(loc))
 }
+
+function getLocationKey(location: NgxLocation) {
+  let key = locationKeys.get(location)
+  if (!key) {
+    key = `location-${locationKeySeed++}`
+    locationKeys.set(location, key)
+  }
+  return key
+}
+
+const Space = resolveComponent('ASpace')
+const Button = resolveComponent('AButton')
+const Popconfirm = resolveComponent('APopconfirm')
+
+function getLocationExtra(index: number) {
+  return h(
+    Space,
+    {},
+    {
+      default: () => [
+        h(
+          Button,
+          {
+            type: 'text',
+            size: 'small',
+            onClick: () => duplicate(index),
+          },
+          {
+            icon: () => h(CopyOutlined, { style: 'font-size: 14px;' }),
+          },
+        ),
+        h(
+          Popconfirm,
+          {
+            title: $gettext('Are you sure you want to remove this location?'),
+            okText: $gettext('Yes'),
+            cancelText: $gettext('No'),
+            onConfirm: () => remove(index),
+          },
+          {
+            default: () => h(
+              Button,
+              {
+                type: 'text',
+                size: 'small',
+              },
+              {
+                icon: () => h(DeleteOutlined, { style: 'font-size: 14px;' }),
+              },
+            ),
+          },
+        ),
+      ],
+    },
+  )
+}
 </script>
 
 <template>
@@ -53,7 +112,7 @@ function duplicate(index: number) {
     <Draggable
       v-else
       :list="locations"
-      item-key="name"
+      :item-key="getLocationKey"
       class="list-group"
       ghost-class="ghost"
       handle=".ant-collapse-header"
@@ -62,55 +121,34 @@ function duplicate(index: number) {
         <ACollapse
           :bordered="false"
           collapsible="header"
+          :items="[{
+            key: getLocationKey(v),
+            style: { border: '0' },
+            extra: !readonly ? getLocationExtra(index) : undefined,
+          }]"
+          :styles="{
+            root: { margin: '10px 0' },
+            header: { alignItems: 'center' },
+            title: { maxWidth: 'calc(90% - 56px)' },
+          }"
         >
-          <ACollapsePanel>
-            <template #header>
-              <HolderOutlined />
-              {{ $gettext('Location') }}
-              {{ v.path }}
-            </template>
-            <template
-              v-if="!readonly"
-              #extra
-            >
-              <ASpace>
-                <AButton
-                  type="text"
-                  size="small"
-                  @click="() => duplicate(index)"
-                >
-                  <template #icon>
-                    <CopyOutlined style="font-size: 14px;" />
-                  </template>
-                </AButton>
-                <APopconfirm
-                  :title="$gettext('Are you sure you want to remove this location?')"
-                  :ok-text="$gettext('Yes')"
-                  :cancel-text="$gettext('No')"
-                  @confirm="remove(index)"
-                >
-                  <AButton
-                    type="text"
-                    size="small"
-                  >
-                    <template #icon>
-                      <DeleteOutlined style="font-size: 14px;" />
-                    </template>
-                  </AButton>
-                </APopconfirm>
-              </ASpace>
-            </template>
+          <template #labelRender>
+            <HolderOutlined />
+            {{ $gettext('Location') }}
+            {{ v.path }}
+          </template>
+          <template #contentRender>
             <AForm layout="vertical">
               <AFormItem :label="$gettext('Comments')">
                 <ATextarea
                   v-model:value="v.comments"
-                  :bordered="false"
+                  variant="borderless"
                 />
               </AFormItem>
               <AFormItem :label="$gettext('Path')">
                 <AInput
                   v-model:value="v.path"
-                  addon-before="location"
+                  prefix="location"
                 />
               </AFormItem>
               <AFormItem :label="$gettext('Content')">
@@ -121,7 +159,7 @@ function duplicate(index: number) {
                 />
               </AFormItem>
             </AForm>
-          </ACollapsePanel>
+          </template>
         </ACollapse>
       </template>
     </Draggable>
@@ -138,7 +176,7 @@ function duplicate(index: number) {
         <AFormItem :label="$gettext('Path')">
           <AInput
             v-model:value="location.path"
-            addon-before="location"
+            prefix="location"
           />
         </AFormItem>
         <AFormItem :label="$gettext('Content')">
@@ -160,21 +198,3 @@ function duplicate(index: number) {
     </div>
   </div>
 </template>
-
-<style lang="less" scoped>
-.ant-collapse {
-  margin: 10px 0;
-}
-
-.ant-collapse-item {
-  border: 0 !important;
-}
-
-.ant-collapse-header {
-  align-items: center;
-}
-
-:deep(.ant-collapse-header-text) {
-  max-width: calc(90% - 56px);
-}
-</style>

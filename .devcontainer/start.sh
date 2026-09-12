@@ -8,7 +8,7 @@ git config --global commit.gpgsign true
 # install air
 go install github.com/air-verse/air@latest
 
-install zsh-autosuggestions
+# install zsh-autosuggestions
 git clone https://github.com/zsh-users/zsh-autosuggestions ~/.oh-my-zsh/custom/plugins/zsh-autosuggestions
 
 if ! grep -q "zsh-autosuggestions" ~/.zshrc; then
@@ -19,12 +19,6 @@ fi
 # init nginx config dir
 ./.devcontainer/init-nginx.sh
 
-# install app dependencies
-echo "Installing app dependencies"
-cd app && pnpm install -f
-cd ..
-
-# install docs dependencies
-echo "Installing docs dependencies"
-cd docs && pnpm install -f
-cd ..
+# install workspace dependencies
+echo "Installing workspace dependencies"
+bun ci

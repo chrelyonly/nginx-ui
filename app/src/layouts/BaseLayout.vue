@@ -3,12 +3,15 @@ import { throttle } from 'lodash'
 import { storeToRefs } from 'pinia'
 import settings from '@/api/settings'
 import PageHeader from '@/components/PageHeader'
-import { useSettingsStore } from '@/pinia'
+import { useRouteHashScroll } from '@/composables/useRouteHashScroll'
+import { useSettingsStore, useUserStore } from '@/pinia'
 import { useNodeAvailabilityStore } from '@/pinia/moudule/nodeAvailability'
 import { useProxyAvailabilityStore } from '@/pinia/moudule/proxyAvailability'
 import FooterLayout from './FooterLayout.vue'
 import HeaderLayout from './HeaderLayout.vue'
 import SideBar from './SideBar.vue'
+
+const { handleRouteEnter } = useRouteHashScroll()
 
 const drawerVisible = ref(false)
 const collapsed = ref(false)
@@ -40,10 +43,13 @@ settings.get_server_name().then(r => {
 // Initialize stores monitoring after user is logged in and layout is mounted
 const proxyAvailabilityStore = useProxyAvailabilityStore()
 const nodeAvailabilityStore = useNodeAvailabilityStore()
+const userStore = useUserStore()
 
 onMounted(() => {
   // Initialize layout
   init()
+
+  void userStore.refreshTwoFAStatus()
 
   // Start monitoring for upstream availability
   proxyAvailabilityStore.startMonitoring()
@@ -73,7 +79,7 @@ provide('breadList', breadList)
         v-model:open="drawerVisible"
         :closable="false"
         placement="left"
-        width="256"
+        :size="256"
         @close="drawerVisible = false"
       >
         <SideBar />
@@ -100,7 +106,7 @@ provide('breadList', breadList)
         <PageHeader />
         <div class="router-view">
           <RouterView v-slot="{ Component, route }">
-            <Transition name="slide-fade">
+            <Transition name="slide-fade" @after-enter="handleRouteEnter">
               <component
                 :is="Component"
                 :key="route.path"
@@ -200,7 +206,7 @@ body {
   max-height: 250px;
 }
 
-.header-notice-wrapper .ant-tabs-tabpane-active {
+.header-notice-wrapper .ant-tabs-content-active {
   overflow-y: scroll;
 }
 

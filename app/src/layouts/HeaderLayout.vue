@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { DesktopOutlined, HomeOutlined, LogoutOutlined, MenuUnfoldOutlined } from '@ant-design/icons-vue'
+import { DesktopOutlined, HomeOutlined, LogoutOutlined, MenuUnfoldOutlined } from '@antdv-next/icons'
 import { useElementSize } from '@vueuse/core'
 import auth from '@/api/auth'
 import NginxControl from '@/components/NginxControl'
 import Notification from '@/components/Notification'
 import ProcessingStatus from '@/components/ProcessingStatus'
+import RecoveryCodeMigrationWarning from '@/components/RecoveryCodeMigrationWarning'
 import { SelfCheckHeaderBanner } from '@/components/SelfCheck'
 import SetLanguage from '@/components/SetLanguage'
 import SwitchAppearance from '@/components/SwitchAppearance'
@@ -43,6 +44,11 @@ const { width: userWrapperWidth } = useElementSize(userWrapperRef)
     </div>
 
     <SelfCheckHeaderBanner
+      :header-weight="headerWidth"
+      :user-wrapper-width="userWrapperWidth"
+    />
+
+    <RecoveryCodeMigrationWarning
       :header-weight="headerWidth"
       :user-wrapper-width="userWrapperWidth"
     />

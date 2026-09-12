@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { DeleteOutlined, HolderOutlined } from '@ant-design/icons-vue'
+import { DeleteOutlined, HolderOutlined } from '@antdv-next/icons'
 import Draggable from 'vuedraggable'
+import { CA_SERVER_OPTIONS } from '@/constants/acme'
 import useSystemSettingsStore from '../store'
 
 const systemSettingsStore = useSystemSettingsStore()
@@ -22,14 +23,22 @@ const { data, errors } = storeToRefs(systemSettingsStore)
         ? $gettext('The url is invalid')
         : ''"
     >
-      <AInput v-model:value="data.cert.ca_dir" />
+      <AAutoComplete
+        v-model:value="data.cert.ca_dir"
+        :options="CA_SERVER_OPTIONS"
+        :placeholder="$gettext('Select or enter a CA directory URL')"
+        allow-clear
+      />
     </AFormItem>
-    <AFormItem :label="$gettext('Certificate Renewal Interval')">
+    <AFormItem
+      :label="$gettext('Certificate Renewal Threshold')"
+      :help="$gettext('Renew certificates when their remaining validity is less than or equal to this value.')"
+    >
       <AInputNumber
         v-model:value="data.cert.renewal_interval"
-        :min="7"
-        :max="21"
-        :addon-after="$gettext('Days')"
+        :min="1"
+        :max="90"
+        :suffix="$gettext('Days')"
       />
     </AFormItem>
     <AFormItem

@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import type { UploadFile } from 'ant-design-vue'
+import type { UploadFile } from 'antdv-next'
 import type { RestoreOptions, RestoreResponse } from '@/api/backup'
-import { InboxOutlined } from '@ant-design/icons-vue'
+import { InboxOutlined } from '@antdv-next/icons'
 import backup from '@/api/backup'
 
 // Define props using TypeScript interface
 interface SystemRestoreProps {
   showTitle?: boolean
   showNginxOptions?: boolean
+  installSecret?: string
+  setupAuth?: boolean
+  frontendDebug?: boolean
 }
 
 // Define emits using TypeScript interface
@@ -16,15 +19,17 @@ interface SystemRestoreEmits {
   (e: 'restoreError', error: Error): void
 }
 
-withDefaults(defineProps<SystemRestoreProps>(), {
+const props = withDefaults(defineProps<SystemRestoreProps>(), {
   showTitle: true,
   showNginxOptions: true,
+  setupAuth: false,
+  frontendDebug: false,
 })
 
 const emit = defineEmits<SystemRestoreEmits>()
 const { message } = useGlobalApp()
 
-// Use UploadFile from ant-design-vue
+// Use UploadFile from antdv-next
 const uploadFiles = ref<UploadFile[]>([])
 const isRestoring = ref(false)
 
@@ -130,9 +135,28 @@ async function doRestore() {
       verify_hash: formModel.verifyHash,
     }
 
-    const data = await backup.restoreBackup(options) as RestoreResponse
+    let data: RestoreResponse
 
-    message.success($gettext('Restore completed successfully'))
+    if (props.frontendDebug) {
+      data = {
+        restore_dir: 'frontend-debug',
+        nginx_ui_restored: formModel.restoreNginxUI,
+        nginx_restored: formModel.restoreNginx,
+        hash_match: true,
+      }
+    }
+    else {
+      data = await backup.restoreBackup(options, props.setupAuth
+        ? {
+            setupAuth: true,
+            installSecret: props.installSecret,
+          }
+        : undefined) as RestoreResponse
+    }
+
+    message.success(props.frontendDebug
+      ? $gettext('Frontend debug mode: restore flow completed without sending a backend request')
+      : $gettext('Restore completed successfully'))
 
     if (data.nginx_restored) {
       message.info($gettext('Nginx configuration has been restored'))
@@ -151,10 +175,6 @@ async function doRestore() {
       })
     }
 
-    if (data.hash_match === false && formModel.verifyHash) {
-      message.warning($gettext('Backup file integrity check failed, it may have been tampered with'))
-    }
-
     // Reset form after successful restore
     uploadFiles.value = []
     formModel.securityToken = ''
@@ -171,11 +191,17 @@ async function doRestore() {
 
 <template>
   <div>
-    <ACard v-if="showTitle" :title="$gettext('System Restore')" :bordered="false">
+    <ACard v-if="showTitle" :title="$gettext('System Restore')" variant="borderless">
       <AAlert
         show-icon
         type="warning"
-        :message="$gettext('Warning: Restore operation will overwrite current configurations. Make sure you have a valid backup file and security token, and carefully select what to restore.')"
+        :title="$gettext('Warning: Restore operation will overwrite current configurations. Make sure you have a valid backup file and security token, and carefully select what to restore.')"
+        class="mb-4"
+      />
+      <AAlert
+        show-icon
+        type="info"
+        :title="$gettext('Only backups created by versions that support signed manifests can be restored. Legacy backups are no longer supported.')"
         class="mb-4"
       />
 
@@ -213,7 +239,7 @@ async function doRestore() {
 
         <AFormItem>
           <ACheckbox v-model:checked="formModel.verifyHash" :disabled="true">
-            {{ $gettext('Verify Backup File Integrity') }}
+            {{ $gettext('Verify Backup File Integrity (required)') }}
           </ACheckbox>
         </AFormItem>
 
@@ -252,7 +278,13 @@ async function doRestore() {
       <AAlert
         show-icon
         type="warning"
-        :message="$gettext('Warning: Restore operation will overwrite current configurations. Make sure you have a valid backup file and security token, and carefully select what to restore.')"
+        :title="$gettext('Warning: Restore operation will overwrite current configurations. Make sure you have a valid backup file and security token, and carefully select what to restore.')"
+        class="mb-4"
+      />
+      <AAlert
+        show-icon
+        type="info"
+        :title="$gettext('Only backups created by versions that support signed manifests can be restored. Legacy backups are no longer supported.')"
         class="mb-4"
       />
 
@@ -290,7 +322,7 @@ async function doRestore() {
 
         <AFormItem>
           <ACheckbox v-model:checked="formModel.verifyHash" :disabled="true">
-            {{ $gettext('Verify Backup File Integrity') }}
+            {{ $gettext('Verify Backup File Integrity (required)') }}
           </ACheckbox>
         </AFormItem>
 

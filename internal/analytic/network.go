@@ -1,20 +1,88 @@
 package analytic
 
 import (
+	"fmt"
 	stdnet "net"
+	"sort"
 	"strings"
 
 	"github.com/shirou/gopsutil/v4/net"
 	"github.com/uozi-tech/cosy/logger"
 )
 
+type networkInterfaceInfo struct {
+	Name         string
+	Flags        stdnet.Flags
+	HardwareAddr stdnet.HardwareAddr
+	Addrs        []stdnet.Addr
+}
+
+func shouldCountNetworkInterface(iface networkInterfaceInfo) bool {
+	if iface.Flags&stdnet.FlagUp == 0 || iface.Flags&stdnet.FlagLoopback != 0 {
+		return false
+	}
+
+	if isVirtualInterface(iface.Name) {
+		return false
+	}
+
+	if len(iface.HardwareAddr) == 0 {
+		return false
+	}
+
+	return hasUsableUnicastIP(iface.Addrs)
+}
+
+func buildCountedInterfaceSet(interfaces []networkInterfaceInfo) map[string]bool {
+	countedInterfaces := make(map[string]bool)
+	for _, iface := range interfaces {
+		if shouldCountNetworkInterface(iface) {
+			countedInterfaces[iface.Name] = true
+		}
+	}
+	return countedInterfaces
+}
+
+func hasUsableUnicastIP(addrs []stdnet.Addr) bool {
+	for _, addr := range addrs {
+		ip, _, err := stdnet.ParseCIDR(addr.String())
+		if err != nil {
+			continue
+		}
+
+		if !ip.IsGlobalUnicast() {
+			continue
+		}
+
+		if ip.IsLinkLocalUnicast() || ip.IsLoopback() || ip.IsMulticast() || ip.IsUnspecified() {
+			continue
+		}
+
+		if isReservedIP(ip) {
+			continue
+		}
+
+		return true
+	}
+
+	return false
+}
+
 func GetNetworkStat() (data *net.IOCountersStat, err error) {
+	data = &net.IOCountersStat{}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			data = &net.IOCountersStat{}
+			err = fmt.Errorf("collect network statistics: %v", recovered)
+		}
+	}()
+
 	networkStats, err := net.IOCounters(true)
 	if err != nil {
 		return
 	}
 	if len(networkStats) == 0 {
-		return &net.IOCountersStat{}, nil
+		return data, nil
 	}
 	// Get all network interfaces
 	interfaces, err := stdnet.Interfaces()
@@ -36,60 +104,27 @@ func GetNetworkStat() (data *net.IOCountersStat, err error) {
 		totalFifoOut     uint64
 	)
 
-	// Create a map of external interface names
-	externalInterfaces := make(map[string]bool)
-
-	// Identify external interfaces
+	interfaceInfos := make([]networkInterfaceInfo, 0, len(interfaces))
 	for _, iface := range interfaces {
-		// Skip down or loopback interfaces
-		if iface.Flags&stdnet.FlagUp == 0 ||
-			iface.Flags&stdnet.FlagLoopback != 0 {
-			continue
-		}
-
-		// Skip common virtual interfaces by name pattern
-		if isVirtualInterface(iface.Name) {
-			continue
-		}
-
-		// Check if this is a physical network interface
-		if isPhysicalInterface(iface.Name) && len(iface.HardwareAddr) > 0 {
-			externalInterfaces[iface.Name] = true
-			continue
-		}
-
-		// Get addresses for this interface
 		addrs, err := iface.Addrs()
 		if err != nil {
 			logger.Error(err)
 			continue
 		}
 
-		// Skip interfaces without addresses
-		if len(addrs) == 0 {
-			continue
-		}
-
-		// Check for non-private IP addresses
-		for _, addr := range addrs {
-			ip, ipNet, err := stdnet.ParseCIDR(addr.String())
-			if err != nil {
-				continue
-			}
-
-			// Skip virtual, local, multicast, and special purpose IPs
-			if !isRealExternalIP(ip, ipNet) {
-				continue
-			}
-
-			externalInterfaces[iface.Name] = true
-			break
-		}
+		interfaceInfos = append(interfaceInfos, networkInterfaceInfo{
+			Name:         iface.Name,
+			Flags:        iface.Flags,
+			HardwareAddr: iface.HardwareAddr,
+			Addrs:        addrs,
+		})
 	}
 
-	// Accumulate stats only from external interfaces
+	countedInterfaces := buildCountedInterfaceSet(interfaceInfos)
+
+	// Accumulate stats only from counted interfaces
 	for _, stat := range networkStats {
-		if externalInterfaces[stat.Name] {
+		if countedInterfaces[stat.Name] {
 			totalBytesRecv += stat.BytesRecv
 			totalBytesSent += stat.BytesSent
 			totalPacketsRecv += stat.PacketsRecv
@@ -118,6 +153,64 @@ func GetNetworkStat() (data *net.IOCountersStat, err error) {
 	}, nil
 }
 
+func GetHostIPAddresses() ([]string, error) {
+	interfaces, err := stdnet.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+
+	ipSet := make(map[string]struct{})
+
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			logger.Error(err)
+			continue
+		}
+
+		ifaceInfo := networkInterfaceInfo{
+			Name:         iface.Name,
+			Flags:        iface.Flags,
+			HardwareAddr: iface.HardwareAddr,
+			Addrs:        addrs,
+		}
+
+		if !shouldCountNetworkInterface(ifaceInfo) {
+			continue
+		}
+
+		for _, addr := range addrs {
+			ip, _, err := stdnet.ParseCIDR(addr.String())
+			if err != nil {
+				continue
+			}
+
+			if !ip.IsGlobalUnicast() {
+				continue
+			}
+
+			if ip.IsLinkLocalUnicast() || ip.IsLoopback() || ip.IsMulticast() || ip.IsUnspecified() {
+				continue
+			}
+
+			if isReservedIP(ip) {
+				continue
+			}
+
+			ipSet[ip.String()] = struct{}{}
+		}
+	}
+
+	ipAddresses := make([]string, 0, len(ipSet))
+	for ip := range ipSet {
+		ipAddresses = append(ipAddresses, ip)
+	}
+
+	sort.Strings(ipAddresses)
+
+	return ipAddresses, nil
+}
+
 // isVirtualInterface checks if the interface is a virtual one based on name patterns
 func isVirtualInterface(name string) bool {
 	// Common virtual interface name patterns
@@ -137,93 +230,6 @@ func isVirtualInterface(name string) bool {
 	}
 
 	return false
-}
-
-// isPhysicalInterface checks if the interface is a physical network interface
-// including server, cloud VM, and container physical interfaces
-func isPhysicalInterface(name string) bool {
-	// Common prefixes for physical network interfaces across different platforms
-	physicalPrefixes := []string{
-		"eth",  // Common Linux Ethernet interface
-		"en",   // macOS and some Linux
-		"ens",  // Predictable network interface names in systemd
-		"enp",  // Predictable network interface names in systemd (PCI)
-		"eno",  // Predictable network interface names in systemd (on-board)
-		"wlan", // Wireless interfaces
-		"wifi", // Some wireless interfaces
-		"wl",   // Shortened wireless interfaces
-		"bond", // Bonded interfaces
-		"em",   // Some server network interfaces
-		"p",    // Some specialized network cards
-		"lan",  // Some network interfaces
-	}
-
-	// Check for exact matches for common primary interfaces
-	if name == "eth0" || name == "en0" || name == "em0" {
-		return true
-	}
-
-	// Check for common physical interface patterns
-	for _, prefix := range physicalPrefixes {
-		if strings.HasPrefix(strings.ToLower(name), prefix) {
-			// Check if the remaining part is numeric or empty
-			suffix := strings.TrimPrefix(strings.ToLower(name), prefix)
-			if suffix == "" || isNumericSuffix(suffix) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-// isNumericSuffix checks if a string is a numeric suffix or starts with a number
-func isNumericSuffix(s string) bool {
-	if len(s) == 0 {
-		return false
-	}
-
-	// Check if the first character is a digit
-	if s[0] >= '0' && s[0] <= '9' {
-		return true
-	}
-
-	return false
-}
-
-// isRealExternalIP checks if an IP is a genuine external (public) IP
-func isRealExternalIP(ip stdnet.IP, ipNet *stdnet.IPNet) bool {
-	// Skip if it's not a global unicast address
-	if !ip.IsGlobalUnicast() {
-		return false
-	}
-
-	// Skip private IPs
-	if ip.IsPrivate() {
-		return false
-	}
-
-	// Skip link-local addresses
-	if ip.IsLinkLocalUnicast() {
-		return false
-	}
-
-	// Skip loopback
-	if ip.IsLoopback() {
-		return false
-	}
-
-	// Skip multicast
-	if ip.IsMulticast() {
-		return false
-	}
-
-	// Check for special reserved ranges
-	if isReservedIP(ip) {
-		return false
-	}
-
-	return true
 }
 
 // isReservedIP checks if an IP belongs to special reserved ranges

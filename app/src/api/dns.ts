@@ -20,9 +20,18 @@ export interface DNSRecord {
   name: string
   content: string
   ttl: number
+  line?: string
   priority?: number
   weight?: number
   proxied?: boolean
+  comment?: string
+}
+
+export interface DNSRecordLine {
+  code: string
+  name?: string
+  display_name?: string
+  father_code?: string
 }
 
 export interface DDNSRecordTarget {
@@ -31,10 +40,19 @@ export interface DDNSRecordTarget {
   type: string
 }
 
+export type DDNSIPVersion
+  = | 'ipv4'
+    | 'ipv6'
+    | 'ipv4_ipv6'
+    | 'ipv6_ipv4'
+
 export interface DDNSConfig {
   enabled: boolean
   interval_seconds: number
+  ip_version: DDNSIPVersion
+  cleanup_conflicting_records: boolean
   targets: DDNSRecordTarget[]
+  deleted_records?: DDNSRecordTarget[]
   last_ipv4?: string
   last_ipv6?: string
   last_run_at?: string
@@ -52,6 +70,8 @@ export interface DDNSDomainItem {
 export interface UpdateDDNSPayload {
   enabled: boolean
   interval_seconds: number
+  ip_version: DDNSIPVersion
+  cleanup_conflicting_records: boolean
   record_ids: string[]
 }
 
@@ -74,9 +94,11 @@ export interface RecordPayload {
   name: string
   content: string
   ttl: number
+  line?: string
   priority?: number
   weight?: number
   proxied?: boolean
+  comment?: string
 }
 
 const baseDomainUrl = '/dns/domains'
@@ -88,14 +110,17 @@ export const dnsApi = {
   listRecords(domainId: number, params?: RecordListParams) {
     return http.get<{ data: DNSRecord[], pagination: Pagination }>(`${baseDomainUrl}/${domainId}/records`, { params })
   },
+  listRecordLines(domainId: number) {
+    return http.get<{ data: DNSRecordLine[] }>(`${baseDomainUrl}/${domainId}/record-lines`)
+  },
   createRecord(domainId: number, payload: RecordPayload) {
     return http.post<DNSRecord>(`${baseDomainUrl}/${domainId}/records`, payload)
   },
   updateRecord(domainId: number, recordId: string, payload: RecordPayload) {
-    return http.put<DNSRecord>(`${baseDomainUrl}/${domainId}/records/${recordId}`, payload)
+    return http.put<DNSRecord>(`${baseDomainUrl}/${domainId}/records/${encodeURIComponent(recordId)}`, payload)
   },
   deleteRecord(domainId: number, recordId: string) {
-    return http.delete(`${baseDomainUrl}/${domainId}/records/${recordId}`)
+    return http.delete(`${baseDomainUrl}/${domainId}/records/${encodeURIComponent(recordId)}`)
   },
   getDDNSConfig(domainId: number) {
     return http.get<DDNSConfig>(`${baseDomainUrl}/${domainId}/ddns`)
@@ -105,6 +130,9 @@ export const dnsApi = {
   },
   listDDNS() {
     return http.get<{ data: DDNSDomainItem[] }>(`/dns/ddns`)
+  },
+  deleteDDNSConfig(domainId: number) {
+    return http.delete(`${baseDomainUrl}/${domainId}/ddns`)
   },
 }
 

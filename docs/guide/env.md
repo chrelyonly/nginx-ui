@@ -28,8 +28,10 @@ Applicable for version v2.0.0-beta.37 and above.
 | Configuration Setting | Environment Variable                |
 |-----------------------|-------------------------------------|
 | IPWhiteList           | NGINX_UI_AUTH_IP_WHITE_LIST         |
+| TrustedProxies        | NGINX_UI_AUTH_TRUSTED_PROXIES      |
 | BanThresholdMinutes   | NGINX_UI_AUTH_BAN_THRESHOLD_MINUTES |
 | MaxAttempts           | NGINX_UI_AUTH_MAX_ATTEMPTS          |
+| SecureSessionTimeoutMinutes | NGINX_UI_AUTH_SECURE_SESSION_TIMEOUT_MINUTES |
 
 ## Casdoor
 | Configuration Setting | Environment Variable              |
@@ -75,7 +77,9 @@ Applicable for version v2.0.0-beta.37 and above.
 | Configuration Setting | Environment Variable               |
 |-----------------------|------------------------------------|
 | GithubProxy           | NGINX_UI_HTTP_GITHUB_PROXY         |
+| HTTPProxy             | NGINX_UI_HTTP_HTTP_PROXY           |
 | InsecureSkipVerify    | NGINX_UI_HTTP_INSECURE_SKIP_VERIFY |
+| WebSocketTrustedOrigins | NGINX_UI_HTTP_WEBSOCKET_TRUSTED_ORIGINS |
 
 ## Logrotate
 | Configuration Setting | Environment Variable        |
@@ -98,12 +102,15 @@ Applicable for version v2.0.0-beta.37 and above.
 | LogDirWhiteList       | NGINX_UI_NGINX_LOG_DIR_WHITE_LIST |
 | StubStatusPort        | NGINX_UI_NGINX_STUB_STATUS_PORT   |
 | ContainerName         | NGINX_UI_NGINX_CONTAINER_NAME     |
+| MaintenanceDir        | NGINX_UI_NGINX_MAINTENANCE_DIR    |
+| MaintenanceTemplate   | NGINX_UI_NGINX_MAINTENANCE_TEMPLATE |
 
 ## Nginx Log
 | Configuration Setting  | Environment Variable                   |
 |------------------------|---------------------------------------|
 | IndexingEnabled | NGINX_UI_NGINX_LOG_INDEXING_ENABLED |
 | IndexPath               | NGINX_UI_NGINX_LOG_INDEX_PATH                |
+| [IndexCustomMMDB](./config-nginx-log.md#indexcustommmdb) | NGINX_UI_NGINX_LOG_INDEX_CUSTOM_MMDB |
 
 ## Node
 | Configuration Setting | Environment Variable            |
@@ -115,6 +122,7 @@ Applicable for version v2.0.0-beta.37 and above.
 ## OpenAI
 | Configuration Setting | Environment Variable     |
 |-----------------------|--------------------------|
+| Provider              | NGINX_UI_OPENAI_PROVIDER |
 | Model                 | NGINX_UI_OPENAI_MODEL    |
 | BaseUrl               | NGINX_UI_OPENAI_BASE_URL |
 | Proxy                 | NGINX_UI_OPENAI_PROXY    |
@@ -139,3 +147,29 @@ In skip installation mode, you can set the following environment variables to cr
 
 - NGINX_UI_PREDEFINED_USER_NAME
 - NGINX_UI_PREDEFINED_USER_PASSWORD
+
+## Host SSH Control
+
+::: info
+These variables are used when Nginx UI controls a host-installed nginx service from a Docker container via SSH.
+:::
+
+| Variable | Description |
+|---|---|
+| `NGINX_UI_NGINX_HOST_MODE` | Set to `ssh` to enable host SSH control |
+| `NGINX_UI_NGINX_HOST_ACCESS_MODE` | `sftp` or `mounted`. Required in SSH mode: whether the container reaches the host nginx files over SFTP or through bind mounts |
+| `NGINX_UI_NGINX_HOST_KEY_SOURCE` | `generated` (default), `existing` or `provided`: where the SSH private key comes from |
+| `NGINX_UI_NGINX_HOST_ADDRESS` | Remote `host:port`, e.g. `host.docker.internal:22` |
+| `NGINX_UI_NGINX_HOST_USER` | SSH user on the host |
+| `NGINX_UI_NGINX_HOST_PRIVATE_KEY_PATH` | Private key path inside the container |
+| `NGINX_UI_NGINX_HOST_KNOWN_HOSTS_PATH` | known_hosts allow-list path inside the container |
+| `NGINX_UI_NGINX_HOST_SUDO_PREFIX` | Default `sudo -n` |
+| `NGINX_UI_NGINX_HOST_SERVICE_MANAGER` | `systemd` (default) or `launchd` |
+| `NGINX_UI_NGINX_HOST_SYSTEMD_UNIT_NAME` | Default `nginx.service` |
+| `NGINX_UI_NGINX_HOST_SYSTEMCTL_PATH` | Absolute path to systemctl on the host |
+| `NGINX_UI_NGINX_HOST_LAUNCHD_SERVICE` | launchd label. Default `homebrew.mxcl.nginx` |
+| `NGINX_UI_NGINX_HOST_LAUNCHCTL_PATH` | Absolute path to launchctl. Default `/bin/launchctl` |
+| `NGINX_UI_NGINX_HOST_CONFIG_DIR` | Host-side nginx config dir |
+| `NGINX_UI_NGINX_HOST_LOG_DIR` | Host-side nginx log dir |
+| `NGINX_UI_NGINX_SBIN_PATH` | Optional in SSH mode: the absolute path of the nginx binary on the host. When empty, Nginx UI resolves the service manager default (`/usr/sbin/nginx` for systemd, `/opt/homebrew/opt/nginx/bin/nginx` for launchd). The generated sudoers allow-list matches the resolved path exactly |
+| `NGINX_UI_DISABLE_BUNDLED_NGINX` | Set to `true` to disable the container's bundled nginx (required in SSH mode) |

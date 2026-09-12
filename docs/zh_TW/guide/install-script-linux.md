@@ -55,6 +55,11 @@ bash -c "$(curl -L https://cloud.nginxui.com/install.sh)" @ install --channel de
 安裝指令碼預設的監聽連接埠為 `9000`，HTTP Challenge 連接埠預設為 `9180`。如果出現連接埠衝突請修改 `/usr/local/etc/nginx-ui/app.ini`，
 並使用 `systemctl restart nginx-ui` 重啟 Nginx UI 守護行程。更多有關資訊，請檢視 [設定參考](./config-server)。
 
+服務首次啟動後，安裝指令碼會在終端機中列印網頁安裝所需的一次性 Secret。
+如果您錯過了這段輸出，可以讀取設定目錄中的隱藏檔案 `.install_secret`。
+預設路徑為 `/usr/local/etc/nginx-ui/.install_secret`。
+如果您自訂了 `DATA_PATH`，請改為讀取 `$DATA_PATH/.install_secret`。
+
 ## 解除安裝
 
 ### `install.sh remove`
@@ -163,6 +168,38 @@ rc-service nginx-ui status
 
 ```shell [開機啟動]
 rc-update add nginx-ui default
+```
+
+:::
+
+### OpenWrt
+
+如果您的系統使用 OpenWrt init 指令碼，請使用以下 `/etc/init.d` 指令控制：
+
+::: code-group
+
+```shell [啟動]
+/etc/init.d/nginx-ui start
+```
+
+```shell [停止]
+/etc/init.d/nginx-ui stop
+```
+
+```shell [重啟]
+/etc/init.d/nginx-ui restart
+```
+
+```shell [顯示狀態]
+/etc/init.d/nginx-ui status
+```
+
+```shell [開機啟動]
+/etc/init.d/nginx-ui enable
+```
+
+```shell [停用開機啟動]
+/etc/init.d/nginx-ui disable
 ```
 
 :::

@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/0xJacky/Nginx-UI/internal/helper"
+	"github.com/0xJacky/Nginx-UI/internal/middleware"
 	"github.com/0xJacky/Nginx-UI/internal/upgrader"
 	"github.com/0xJacky/Nginx-UI/internal/version"
 	"github.com/gin-gonic/gin"
@@ -50,9 +51,7 @@ type CoreUpgradeResp struct {
 
 func PerformCoreUpgrade(c *gin.Context) {
 	var upGrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
+		CheckOrigin: middleware.CheckWebSocketOrigin,
 	}
 	// upgrade http to websocket
 	ws, err := upGrader.Upgrade(c.Writer, c.Request, nil)
@@ -61,6 +60,8 @@ func PerformCoreUpgrade(c *gin.Context) {
 		return
 	}
 	defer ws.Close()
+
+	wsWriter := helper.NewSafeWebSocketWriter(ws)
 
 	var control upgrader.Control
 
@@ -71,8 +72,8 @@ func PerformCoreUpgrade(c *gin.Context) {
 		return
 	}
 	if helper.InNginxUIOfficialDocker() && helper.DockerSocketExists() {
-		upgrader.DockerUpgrade(ws, &control)
+		upgrader.DockerUpgrade(wsWriter, &control)
 	} else {
-		upgrader.BinaryUpgrade(ws, &control)
+		upgrader.BinaryUpgrade(wsWriter, &control)
 	}
 }

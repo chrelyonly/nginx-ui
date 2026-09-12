@@ -1,10 +1,17 @@
 <script setup lang="ts">
-import type { RecordPayload } from '@/api/dns'
+import type { DNSRecordLine, RecordPayload } from '@/api/dns'
 import { computed } from 'vue'
 
 const props = defineProps<{
   showProxied?: boolean
+  showComment?: boolean
+  showLine?: boolean
+  lineOptions?: DNSRecordLine[]
+  isLineLoading?: boolean
+  defaultLineCode?: string
+  lineDisabled?: boolean
   valueSuggestions?: string[]
+  showName?: boolean
 }>()
 
 const formModel = defineModel<RecordPayload>('record', {
@@ -27,6 +34,27 @@ const recordTypes = [
   'SRV',
   'CAA',
 ]
+
+const resolutionLineOptions = computed(() => {
+  const lines = [...(props.lineOptions ?? [])]
+  const currentLine = formModel.value.line?.trim()
+  const defaultLineCode = props.defaultLineCode?.trim()
+
+  if (defaultLineCode && !lines.some(line => line.code === defaultLineCode)) {
+    lines.unshift({ code: defaultLineCode, display_name: $gettext('Default') })
+  }
+  if (currentLine && !lines.some(line => line.code === currentLine)) {
+    lines.push({ code: currentLine, display_name: currentLine })
+  }
+
+  return lines.map(line => {
+    const name = line.display_name || line.name || line.code
+    return {
+      label: name === line.code ? name : `${name} (${line.code})`,
+      value: line.code,
+    }
+  })
+})
 
 const showPriority = computed(() => {
   const type = formModel.value.type.toUpperCase()
@@ -60,7 +88,7 @@ function handleValueKeydown(event: KeyboardEvent) {
         :options="recordTypes.map(value => ({ label: value, value }))"
       />
     </AFormItem>
-    <AFormItem :label="$gettext('Name')" :rules="[{ required: true }]">
+    <AFormItem v-if="props.showName !== false" :label="$gettext('Name')" :rules="[{ required: true }]">
       <AInput v-model:value="formModel.name" :placeholder="$gettext('Use @ for root')" />
     </AFormItem>
     <AFormItem :label="$gettext('Value')" :rules="[{ required: true }]">
@@ -78,6 +106,16 @@ function handleValueKeydown(event: KeyboardEvent) {
     <AFormItem :label="$gettext('TTL (seconds)')" :rules="[{ required: true, type: 'number', min: 1 }]">
       <AInputNumber v-model:value="formModel.ttl" :min="1" :step="60" style="width: 100%;" />
     </AFormItem>
+    <AFormItem v-if="props.showLine" :label="$gettext('Resolution Line')" :rules="[{ required: true }]">
+      <ASelect
+        v-model:value="formModel.line"
+        :options="resolutionLineOptions"
+        :loading="props.isLineLoading"
+        :disabled="props.lineDisabled"
+        show-search
+        option-filter-prop="label"
+      />
+    </AFormItem>
     <AFormItem v-if="showPriority" :label="$gettext('Priority')" :rules="[{ required: true, type: 'number', min: 0 }]">
       <AInputNumber v-model:value="formModel.priority" :min="0" style="width: 100%;" />
     </AFormItem>
@@ -86,6 +124,13 @@ function handleValueKeydown(event: KeyboardEvent) {
     </AFormItem>
     <AFormItem v-if="props.showProxied" :label="$gettext('Proxied')">
       <ASwitch v-model:checked="formModel.proxied" />
+    </AFormItem>
+    <AFormItem v-if="props.showComment" :label="$gettext('Comment')">
+      <ATextarea
+        v-model:value="formModel.comment"
+        :placeholder="$gettext('Optional comment for this DNS record')"
+        :auto-size="{ minRows: 2, maxRows: 4 }"
+      />
     </AFormItem>
   </AForm>
 </template>

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/0xJacky/Nginx-UI/api"
 	"github.com/0xJacky/Nginx-UI/internal/config"
-	"github.com/0xJacky/Nginx-UI/internal/helper"
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
 	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/0xJacky/Nginx-UI/query"
@@ -30,17 +30,28 @@ func EditConfig(c *gin.Context) {
 		return
 	}
 
-	var absPath string
-	if filepath.IsAbs(json.Path) {
-		absPath = json.Path
-	} else {
-		absPath = nginx.GetConfPath(json.Path)
+	absPath, err := config.ResolveAbsoluteOrRelativeConfPath(json.Path)
+	if err != nil {
+		cosy.ErrHandler(c, err)
+		return
 	}
 
-	if !helper.FileExists(absPath) {
+	exists, err := nginx.Exists(absPath)
+	if err != nil {
+		cosy.ErrHandler(c, err)
+		return
+	}
+	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{
 			"message": "file not found",
 		})
+		return
+	}
+
+	content := json.Content
+	err = config.ValidateConfigFile(absPath, content)
+	if err != nil {
+		cosy.ErrHandler(c, err)
 		return
 	}
 
@@ -67,8 +78,7 @@ func EditConfig(c *gin.Context) {
 	cfg.SyncNodeIds = json.SyncNodeIds
 	cfg.SyncOverwrite = json.SyncOverwrite
 
-	content := json.Content
-	err = config.Save(absPath, content, cfg)
+	err = config.Save(absPath, content, cfg, api.CurrentUser(c).Name)
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return

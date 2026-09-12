@@ -5,7 +5,7 @@ import type {
 import type { Site, SiteStatus } from '@/api/site'
 import type { JSXElements } from '@/types'
 import { datetimeRender } from '@uozi-admin/curd'
-import { Tag } from 'ant-design-vue'
+import { Tag } from 'antdv-next'
 import namespace from '@/api/namespace'
 import NamespaceRender from '@/components/NamespaceRender'
 import ProxyTargets from '@/components/ProxyTargets'
@@ -44,6 +44,12 @@ const columns: StdTableColumn[] = [{
       <div>{text}</div>,
     )
 
+    if (record.description) {
+      template.push(
+        <div class="text-secondary mt-1">{record.description}</div>,
+      )
+    }
+
     // Add URLs below the name
     if (record.urls && record.urls.length > 0) {
       const urlsContainer: JSXElements = []
@@ -53,7 +59,7 @@ const columns: StdTableColumn[] = [{
           const displayUrl = url.replace(/^https?:\/\//, '')
           urlsContainer.push(
             <a href={url} target="_blank" rel="noopener noreferrer">
-              <Tag color="blue" bordered={false} style="margin-right: 8px; margin-bottom: 4px;">
+              <Tag color="blue" variant="filled" style={{ marginRight: '8px', marginBottom: '4px' }}>
                 {displayUrl}
               </Tag>
             </a>,
@@ -63,7 +69,7 @@ const columns: StdTableColumn[] = [{
       else {
         record.urls.forEach((url: string) => {
           const displayUrl = url.replace(/^https?:\/\//, '')
-          urlsContainer.push(<Tag bordered={false} style="margin-right: 8px; margin-bottom: 4px;">{displayUrl}</Tag>)
+          urlsContainer.push(<Tag variant="filled" style={{ marginRight: '8px', marginBottom: '4px' }}>{displayUrl}</Tag>)
         })
       }
 
@@ -122,14 +128,9 @@ const columns: StdTableColumn[] = [{
   customRender: (args: CustomRenderArgs<Site>) => {
     const { text, record } = args
     return h(SiteStatusSelect, {
-      'modelValue': text,
-      'siteName': record.name,
-      'enabled': record.status !== ConfigStatus.Disabled,
-      'onUpdate:modelValue': (val: string) => {
-        // This will be handled by the component internal events
-        record.status = val as SiteStatus
-      },
-      'onStatusChanged': ({ status }: { status: SiteStatus }) => {
+      status: text as SiteStatus,
+      siteName: record.name,
+      onStatusChanged: ({ status }: { status: SiteStatus }) => {
         record.status = status
       },
     })
@@ -159,7 +160,7 @@ const columns: StdTableColumn[] = [{
 }, {
   title: () => $gettext('Actions'),
   dataIndex: 'actions',
-  width: 80,
+  width: 120,
   fixed: 'right',
 }]
 

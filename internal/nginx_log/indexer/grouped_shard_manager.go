@@ -1,19 +1,24 @@
 package indexer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/0xJacky/Nginx-UI/query"
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/index/scorch"
 	"github.com/google/uuid"
 	"github.com/uozi-tech/cosy/logger"
 )
+
+const existingShardLockTimeout = 5 * time.Second
 
 // GroupedShardManager manages shards grouped by MainLogPath. Each group uses a
 // unique UUID directory:
@@ -228,10 +233,7 @@ func (gsm *GroupedShardManager) GetShardStats() []*ShardInfo {
 		docCount, _ := shard.DocCount()
 
 		path := group.ShardPaths[ref.localID]
-		var size int64
-		if st, err := os.Stat(path); err == nil {
-			size = st.Size()
-		}
+		size, _ := directorySize(path)
 
 		stats = append(stats, &ShardInfo{
 			ID:            gid,
@@ -278,7 +280,39 @@ func (gsm *GroupedShardManager) OptimizeShard(id int) error {
 	if err != nil {
 		return err
 	}
-	return shard.SetInternal([]byte("_optimize"), []byte("trigger"))
+	advanced, err := shard.Advanced()
+	if err != nil {
+		return fmt.Errorf("get advanced index for shard %d: %w", id, err)
+	}
+	scorchIndex, ok := advanced.(*scorch.Scorch)
+	if !ok {
+		return fmt.Errorf("optimize shard %d: unsupported index type %T", id, advanced)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := scorchIndex.ForceMerge(ctx, nil); err != nil {
+		return fmt.Errorf("force merge shard %d: %w", id, err)
+	}
+	return nil
+}
+
+func directorySize(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
 }
 
 // Destroy removes all index data for all groups.
@@ -374,6 +408,7 @@ func (gsm *GroupedShardManager) getOrCreateGroup(mainLogPath string) (*ShardGrou
 		if err != nil {
 			return nil, fmt.Errorf("failed to init shard %d for group %s: %w", i, uuidStr, err)
 		}
+		shard.SetName(mainLogPath)
 		group.Shards[i] = shard
 		group.ShardPaths[i] = shardPath
 
@@ -407,24 +442,35 @@ func (gsm *GroupedShardManager) openOrCreateShard(groupBase string, shardID int)
 	var idx bleve.Index
 	var err error
 	if _, statErr := os.Stat(filepath.Join(shardPath, "index_meta.json")); os.IsNotExist(statErr) {
-		// New index, reuse original mapping and storage optimizations
 		mapping := CreateLogIndexMapping()
-		kvConfig := map[string]interface{}{
-			"scorchMergePlanOptions": map[string]interface{}{
-				"FloorSegmentFileSize": 5000000,
-			},
-		}
+		kvConfig := scorchRuntimeConfig(gsm.config)
 		idx, err = bleve.NewUsing(shardPath, mapping, bleve.Config.DefaultIndexType, bleve.Config.DefaultMemKVStore, kvConfig)
 		if err != nil {
 			return nil, "", fmt.Errorf("create bleve index: %w", err)
 		}
 	} else {
-		idx, err = bleve.Open(shardPath)
+		idx, err = openExistingShard(shardPath, existingShardLockTimeout)
 		if err != nil {
 			return nil, "", fmt.Errorf("open bleve index: %w", err)
 		}
 	}
 	return idx, shardPath, nil
+}
+
+func scorchRuntimeConfig(config *Config) map[string]interface{} {
+	maxSegmentSize := int64(64 * 1024 * 1024)
+	if config != nil && config.MaxSegmentSize > 0 {
+		maxSegmentSize = config.MaxSegmentSize
+	}
+	return map[string]interface{}{
+		"scorchPersisterOptions": map[string]interface{}{
+			"NumPersisterWorkers":           1,
+			"MaxSizeInMemoryMergePerWorker": int(maxSegmentSize),
+		},
+		"scorchMergePlanOptions": map[string]interface{}{
+			"FloorSegmentFileSize": maxSegmentSize / 6,
+		},
+	}
 }
 
 // loadExistingGroups scans the database for existing main_log_path groups and opens their shards.
@@ -504,11 +550,12 @@ func (gsm *GroupedShardManager) loadExistingGroups() error {
 				continue
 			}
 
-			idx, openErr := bleve.Open(shardPath)
+			idx, openErr := openExistingShard(shardPath, existingShardLockTimeout)
 			if openErr != nil {
 				logger.Warnf("loadExistingGroups: failed to open shard at %s: %v", shardPath, openErr)
 				continue
 			}
+			idx.SetName(mainPath)
 			group.Shards[i] = idx
 			group.ShardPaths[i] = shardPath
 
@@ -528,6 +575,12 @@ func (gsm *GroupedShardManager) loadExistingGroups() error {
 	}
 
 	return nil
+}
+
+func openExistingShard(shardPath string, lockTimeout time.Duration) (bleve.Index, error) {
+	return bleve.OpenUsing(shardPath, map[string]interface{}{
+		"bolt_timeout": lockTimeout.String(),
+	})
 }
 
 // getOrCreateUUID: Find the first record UUID for a MainLogPath in the DB; create a placeholder if not found.

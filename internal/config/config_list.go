@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
@@ -68,7 +69,12 @@ func Sort(key string, order string, configs []Config) []Config {
 }
 
 func GetConfigList(relativePath string, filter func(file os.FileInfo) bool) ([]Config, error) {
-	configFiles, err := os.ReadDir(nginx.GetConfPath(relativePath))
+	resolvedPath, err := ResolveConfPath(relativePath)
+	if err != nil {
+		return nil, err
+	}
+
+	configFiles, err := nginx.ReadDir(resolvedPath)
 	if err != nil {
 		return nil, err
 	}
@@ -94,14 +100,14 @@ func GetConfigList(relativePath string, filter func(file os.FileInfo) bool) ([]C
 			}
 		case mode&os.ModeSymlink != 0: // is a symbol
 			var targetPath string
-			targetPath, err = os.Readlink(nginx.GetConfPath(relativePath, file.Name()))
+			targetPath, err = nginx.Readlink(filepath.Join(resolvedPath, file.Name()))
 			if err != nil {
 				logger.Error("Read Symlink Error", targetPath, err)
 				continue
 			}
 
 			var targetInfo os.FileInfo
-			targetInfo, err = os.Stat(targetPath)
+			targetInfo, err = nginx.Stat(targetPath)
 			if err != nil {
 				logger.Error("Stat Error", targetPath, err)
 				continue

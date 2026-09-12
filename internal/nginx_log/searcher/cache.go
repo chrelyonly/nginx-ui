@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
+	"sync"
 	"time"
 
 	"github.com/0xJacky/Nginx-UI/internal/nginx_log/utils"
@@ -15,11 +15,23 @@ import (
 
 // Cache provides high-performance caching using Ristretto
 type Cache struct {
-	cache *ristretto.Cache[string, *SearchResult]
+	cache   *ristretto.Cache[string, *SearchResult]
+	maxCost int64
+
+	// closeMu guards every use of cache against a concurrent Close. Ristretto
+	// panics with "send on closed channel" when Set or Clear runs after Close,
+	// and SwapShards clears the cache from a detached goroutine, so a closing
+	// searcher can otherwise crash the process. Cache operations take the read
+	// lock so they still run concurrently with each other.
+	closeMu sync.RWMutex
+	closed  bool
 }
 
-// NewCache creates a new cache with Ristretto
+// NewCache creates a cache whose cost unit is one KiB of serialized result data.
 func NewCache(maxSize int64) *Cache {
+	if maxSize <= 0 {
+		maxSize = 1
+	}
 	cache, err := ristretto.NewCache(&ristretto.Config[string, *SearchResult]{
 		NumCounters: maxSize * 10,
 		MaxCost:     maxSize,
@@ -30,7 +42,7 @@ func NewCache(maxSize int64) *Cache {
 		panic(fmt.Sprintf("failed to create cache: %v", err))
 	}
 
-	return &Cache{cache: cache}
+	return &Cache{cache: cache, maxCost: maxSize}
 }
 
 // CacheKeyData represents the normalized data used for cache key generation
@@ -38,6 +50,7 @@ type CacheKeyData struct {
 	Query          string   `json:"query"`
 	Limit          int      `json:"limit"`
 	Offset         int      `json:"offset"`
+	SearchAfter    []string `json:"search_after"`
 	SortBy         string   `json:"sort_by"`
 	SortOrder      string   `json:"sort_order"`
 	StartTime      *int64   `json:"start_time"`
@@ -52,6 +65,7 @@ type CacheKeyData struct {
 	UserAgents     []string `json:"user_agents"`
 	Referers       []string `json:"referers"`
 	Countries      []string `json:"countries"`
+	Provinces      []string `json:"provinces"`
 	Browsers       []string `json:"browsers"`
 	OSs            []string `json:"operating_systems"`
 	Devices        []string `json:"devices"`
@@ -111,6 +125,7 @@ func (c *Cache) GenerateKey(req *SearchRequest) string {
 		Query:          req.Query,
 		Limit:          req.Limit,
 		Offset:         req.Offset,
+		SearchAfter:    req.SearchAfter,
 		SortBy:         req.SortBy,
 		SortOrder:      req.SortOrder,
 		StartTime:      req.StartTime,
@@ -125,6 +140,7 @@ func (c *Cache) GenerateKey(req *SearchRequest) string {
 		UserAgents:     sortedUniqueStrings(req.UserAgents),
 		Referers:       sortedUniqueStrings(req.Referers),
 		Countries:      sortedUniqueStrings(req.Countries),
+		Provinces:      sortedUniqueStrings(req.Provinces),
 		Browsers:       sortedUniqueStrings(req.Browsers),
 		OSs:            sortedUniqueStrings(req.OSs),
 		Devices:        sortedUniqueStrings(req.Devices),
@@ -168,6 +184,12 @@ func (c *Cache) generateFallbackKey(req *SearchRequest) string {
 func (c *Cache) Get(req *SearchRequest) *SearchResult {
 	key := c.GenerateKey(req)
 
+	c.closeMu.RLock()
+	defer c.closeMu.RUnlock()
+	if c.closed {
+		return nil
+	}
+
 	result, found := c.cache.Get(key)
 	if !found {
 		return nil
@@ -182,20 +204,95 @@ func (c *Cache) Get(req *SearchRequest) *SearchResult {
 func (c *Cache) Put(req *SearchRequest, result *SearchResult, ttl time.Duration) {
 	key := c.GenerateKey(req)
 
-	cost := int64(1 + len(result.Hits)/10)
-	if cost < 1 {
-		cost = 1
+	cost, ok := searchResultCost(result)
+	if !ok || cost > c.maxCost {
+		return
+	}
+
+	c.closeMu.RLock()
+	defer c.closeMu.RUnlock()
+	if c.closed {
+		return
 	}
 
 	c.cache.SetWithTTL(key, result, cost, ttl)
 	c.cache.Wait()
 }
 
+// statsCacheKey derives a key that ignores pagination, sorting and the
+// presentation options. Statistics describe the whole match set rather than
+// one page of it, so every page of the same filter must share a single entry —
+// otherwise paging through results would re-run the scan for each page.
+func (c *Cache) statsCacheKey(req *SearchRequest) string {
+	normalized := *req
+	normalized.Limit = 0
+	normalized.Offset = 0
+	normalized.SearchAfter = nil
+	normalized.SortBy = ""
+	normalized.SortOrder = ""
+	normalized.Fields = nil
+	normalized.IncludeFacets = false
+	normalized.FacetFields = nil
+	normalized.FacetSize = 0
+	normalized.IncludeHighlighting = false
+
+	return "stats:" + c.GenerateKey(&normalized)
+}
+
+// GetSearchStats returns cached statistics for the request's match set.
+func (c *Cache) GetSearchStats(req *SearchRequest) *SearchStats {
+	entry, found := c.cache.Get(c.statsCacheKey(req))
+	if !found || entry == nil {
+		return nil
+	}
+
+	return entry.Stats
+}
+
+// PutSearchStats stores statistics for the request's match set. The cache is
+// typed to search results, so the statistics travel in an otherwise empty one.
+func (c *Cache) PutSearchStats(req *SearchRequest, stats *SearchStats, ttl time.Duration) {
+	result := &SearchResult{Stats: stats}
+	cost, ok := searchResultCost(result)
+	if !ok || cost > c.maxCost {
+		return
+	}
+	c.closeMu.RLock()
+	defer c.closeMu.RUnlock()
+	if c.closed {
+		return
+	}
+
+	c.cache.SetWithTTL(c.statsCacheKey(req), result, cost, ttl)
+	c.cache.Wait()
+}
+
+func searchResultCost(result *SearchResult) (int64, bool) {
+	data, err := json.Marshal(result)
+	if err != nil {
+		return 0, false
+	}
+	const costUnitBytes = 1024
+	cost := int64((len(data) + costUnitBytes - 1) / costUnitBytes)
+	if cost < 1 {
+		cost = 1
+	}
+	return cost, true
+}
+
 // Clear clears all cached entries
 func (c *Cache) Clear() {
-	if c != nil && c.cache != nil {
-		c.cache.Clear()
+	if c == nil {
+		return
 	}
+
+	c.closeMu.RLock()
+	defer c.closeMu.RUnlock()
+	if c.closed || c.cache == nil {
+		return
+	}
+
+	c.cache.Clear()
 }
 
 // GetStats returns cache statistics
@@ -228,129 +325,52 @@ type CacheStats struct {
 	Cost      int64   `json:"cost"`
 }
 
-// Warmup pre-loads frequently used queries into cache
-func (c *Cache) Warmup(queries []WarmupQuery) {
-	for _, query := range queries {
-		if query.Result != nil {
-			key := c.GenerateKey(query.Request)
-			c.cache.Set(key, query.Result, 1)
-		}
-	}
-
-	c.cache.Wait()
-}
-
-// WarmupQuery represents a query and result pair for cache warmup
-type WarmupQuery struct {
-	Request *SearchRequest `json:"request"`
-	Result  *SearchResult  `json:"result"`
-}
-
 // Close closes the cache and frees resources
 func (c *Cache) Close() {
+	if c == nil {
+		return
+	}
+
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
+
 	c.cache.Close()
 }
 
-// KeyGen provides even faster key generation for hot paths
-type KeyGen struct {
-	buffer []byte
+// Searcher cache accessors
+
+func (ds *Searcher) getFromCache(req *SearchRequest) *SearchResult {
+	if ds.cache == nil {
+		return nil
+	}
+
+	return ds.cache.Get(req)
 }
 
-// NewKeyGen creates a key generator with pre-allocated buffer
-func NewKeyGen() *KeyGen {
-	return &KeyGen{
-		buffer: make([]byte, 0, 256),
+func (ds *Searcher) cacheResult(req *SearchRequest, result *SearchResult) {
+	if ds.cache == nil {
+		return
 	}
+
+	ds.cache.Put(req, result, DefaultCacheTTL)
 }
 
-// GenerateKey generates a key using pre-allocated buffer
-func (kg *KeyGen) GenerateKey(req *SearchRequest) string {
-	kg.buffer = kg.buffer[:0]
-
-	kg.buffer = append(kg.buffer, "q:"...)
-	kg.buffer = append(kg.buffer, req.Query...)
-	kg.buffer = append(kg.buffer, "|l:"...)
-	kg.buffer = strconv.AppendInt(kg.buffer, int64(req.Limit), 10)
-	kg.buffer = append(kg.buffer, "|o:"...)
-	kg.buffer = strconv.AppendInt(kg.buffer, int64(req.Offset), 10)
-	kg.buffer = append(kg.buffer, "|s:"...)
-	kg.buffer = append(kg.buffer, req.SortBy...)
-	kg.buffer = append(kg.buffer, "|so:"...)
-	kg.buffer = append(kg.buffer, req.SortOrder...)
-
-	if req.StartTime != nil {
-		kg.buffer = append(kg.buffer, "|st:"...)
-		kg.buffer = strconv.AppendInt(kg.buffer, *req.StartTime, 10)
+// ClearCache clears the search cache
+func (ds *Searcher) ClearCache() error {
+	if ds.cache != nil {
+		ds.cache.Clear()
 	}
-	if req.EndTime != nil {
-		kg.buffer = append(kg.buffer, "|et:"...)
-		kg.buffer = strconv.AppendInt(kg.buffer, *req.EndTime, 10)
-	}
-
-	if len(req.StatusCodes) > 0 {
-		kg.buffer = append(kg.buffer, "|sc:"...)
-		for i, code := range req.StatusCodes {
-			if i > 0 {
-				kg.buffer = append(kg.buffer, ',')
-			}
-			kg.buffer = strconv.AppendInt(kg.buffer, int64(code), 10)
-		}
-	}
-
-	return string(kg.buffer)
+	return nil
 }
 
-// Middleware provides middleware functionality for caching
-type Middleware struct {
-	cache      *Cache
-	keyGen     *KeyGen
-	enabled    bool
-	defaultTTL time.Duration
-}
-
-// NewMiddleware creates a new cache middleware
-func NewMiddleware(cache *Cache, defaultTTL time.Duration) *Middleware {
-	return &Middleware{
-		cache:      cache,
-		keyGen:     NewKeyGen(),
-		enabled:    true,
-		defaultTTL: defaultTTL,
+// GetCacheStats returns cache statistics
+func (ds *Searcher) GetCacheStats() *CacheStats {
+	if ds.cache != nil {
+		return ds.cache.GetStats()
 	}
-}
-
-// Enable enables caching
-func (m *Middleware) Enable() {
-	m.enabled = true
-}
-
-// Disable disables caching
-func (m *Middleware) Disable() {
-	m.enabled = false
-}
-
-// IsEnabled returns whether caching is enabled
-func (m *Middleware) IsEnabled() bool {
-	return m.enabled
-}
-
-// GetOrSet attempts to get from cache, or executes the provided function and caches the result
-func (m *Middleware) GetOrSet(req *SearchRequest, fn func() (*SearchResult, error)) (*SearchResult, error) {
-	if !m.enabled {
-		return fn()
-	}
-
-	if cached := m.cache.Get(req); cached != nil {
-		return cached, nil
-	}
-
-	result, err := fn()
-	if err != nil {
-		return nil, err
-	}
-
-	if result != nil {
-		m.cache.Put(req, result, m.defaultTTL)
-	}
-
-	return result, nil
+	return nil
 }

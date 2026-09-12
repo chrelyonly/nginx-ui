@@ -23,7 +23,7 @@ Yet another Nginx Web UI, được phát triển bởi [0xJacky](https://jackyu.
 
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/0xJacky/nginx-ui.svg)](https://starchart.cc/0xJacky/nginx-ui)
+[![Stargazers over time](https://cloud.nginxui.com/stars/0xJacky/nginx-ui.svg)](https://cloud.nginxui.com/stars/0xJacky/nginx-ui.svg)
 
 [English](../../README.md) | [Español](README-es.md) | [简体中文](README-zh_CN.md) | [繁體中文](README-zh_TW.md) | [Tiếng Việt](README-vi_VN.md)
 
@@ -127,7 +127,7 @@ http {
 }
 ```
 
-Để biết thêm thông tin: [debian/conf/nginx.conf](https://salsa.debian.org/nginx-team/nginx/-/blob/master/debian/conf/nginx.conf#L59-L60)
+Để biết thêm thông tin: [debian/conf/nginx.conf](https://salsa.debian.org/nginx-team/nginx/-/blob/debian/latest/debian/conf/nginx.conf#L60-L61)
 
 ### Cài đặt
 
@@ -192,6 +192,7 @@ Docker image của chúng tôi [uozi/nginx-ui:latest](https://hub.docker.com/r/u
 ##### Ghi chú
 1. Khi khởi chạy container lần đầu tiên, hãy chắc chắn thư mục /etc/nginx trên máy host là rỗng.
 2. Nếu bạn muốn lưu trữ các tệp tĩnh, bạn có thể mount các thư mục vào container.
+3. If you are upgrading from an older image, see the [Docker WebSocket fix guide](https://nginxui.com/guide/docker-websocket-fix.html) for required `conf.d/nginx-ui.conf` updates.
 
 <details>
 <summary><b>Triển khai với Docker</b></summary>
@@ -270,8 +271,8 @@ Trên các nền tảng không có phiên bản xây dựng chính thức, chún
 Vui lòng thực hiện lệnh sau trong thư mục `app`.
 
 ```shell
-pnpm install
-pnpm build
+bun install
+bun run build
 ```
 
 ### Build Backend
@@ -364,6 +365,16 @@ Nếu bạn có đề xuất giúp dự án tốt hơn, vui lòng phân nhánh r
 3. Commit thay đổi (`git commit -m 'Add some AmazingFeature'`)
 4. Đẩy code lên Branch (`git push origin feature/AmazingFeature`)
 5. Mở một Pull Request
+
+## Cộng đồng
+
+Hãy tham gia nhóm cộng đồng WeChat chính thức của Nginx UI để trao đổi với những người dùng khác về cách sử dụng, triển khai và xử lý sự cố.
+
+Quét mã QR bên dưới để thêm WeChat và ghi `Nginx UI Community Group` trong lời mời kết bạn. Quản trị viên sẽ mời bạn vào nhóm cộng đồng chính thức.
+
+<p align="center">
+  <img src="../../docs/public/assets/wechat-community-qr.png" alt="Nginx UI WeChat Community QR Code" width="320">
+</p>
 
 ## Giấy phép
 

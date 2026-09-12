@@ -3,60 +3,99 @@ package site
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"runtime"
 	"sync"
 
-	"github.com/0xJacky/Nginx-UI/internal/helper"
+	"github.com/0xJacky/Nginx-UI/internal/config"
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
+	"github.com/0xJacky/Nginx-UI/internal/nodeauth"
 	"github.com/0xJacky/Nginx-UI/internal/notification"
 	"github.com/0xJacky/Nginx-UI/query"
-	"github.com/go-resty/resty/v2"
 	"github.com/uozi-tech/cosy/logger"
 )
 
 func Rename(oldName string, newName string) (err error) {
-	oldPath := nginx.GetConfPath("sites-available", oldName)
-	newPath := nginx.GetConfPath("sites-available", newName)
+	oldPath, err := ResolveAvailablePath(oldName)
+	if err != nil {
+		return err
+	}
+
+	newPath, err := ResolveAvailablePath(newName)
+	if err != nil {
+		return err
+	}
 
 	if oldPath == newPath {
 		return
 	}
 
+	err = config.ValidateConfigFilename(newPath)
+	if err != nil {
+		return
+	}
+
 	// check if dst file exists, do not rename
-	if helper.FileExists(newPath) {
+	destinationExists, err := nginx.Exists(newPath)
+	if err != nil {
+		return err
+	}
+	if destinationExists {
 		return ErrDstFileExists
 	}
 
 	s := query.Site
 	_, _ = s.Where(s.Path.Eq(oldPath)).Update(s.Path, newPath)
 
-	err = os.Rename(oldPath, newPath)
+	err = nginx.Rename(oldPath, newPath)
 	if err != nil {
 		return
 	}
 
 	// recreate a soft link
-	oldEnabledConfigFilePath := nginx.GetConfPath("sites-enabled", oldName)
-	if helper.SymbolLinkExists(oldEnabledConfigFilePath) {
-		_ = os.Remove(oldEnabledConfigFilePath)
-		newEnabledConfigFilePath := nginx.GetConfPath("sites-enabled", newName)
-		err = os.Symlink(newPath, newEnabledConfigFilePath)
+	oldEnabledConfigFilePath, err := ResolveEnabledPath(oldName)
+	if err != nil {
+		return err
+	}
+
+	// Any entry in the enabled tree counts, not only a symlink: a copied
+	// config or a restored backup leaves a regular file there, and leaving it
+	// behind would keep serving the old content under the old name.
+	relinked := false
+	enabledEntryExists, err := nginx.EntryExists(oldEnabledConfigFilePath)
+	if err != nil {
+		return err
+	}
+	if enabledEntryExists {
+		_ = nginx.Remove(oldEnabledConfigFilePath)
+		var newEnabledConfigFilePath string
+		newEnabledConfigFilePath, err = ResolveEnabledPath(newName)
+		if err != nil {
+			return err
+		}
+
+		err = nginx.Symlink(newPath, newEnabledConfigFilePath)
 		if err != nil {
 			return
 		}
+
+		relinked = true
 	}
 
-	// test nginx configuration
-	res := nginx.Control(nginx.TestConfig)
-	if res.IsError() {
-		return res.GetError()
-	}
+	// Only the enabled tree feeds the running Nginx. A rename that did not touch
+	// it changes nothing locally, which is always the case for a remote
+	// namespace because it never creates a local symlink.
+	if relinked {
+		// test nginx configuration
+		res := nginx.Control(nginx.TestConfig)
+		if res.IsError() {
+			return res.GetError()
+		}
 
-	// reload nginx
-	res = nginx.Control(nginx.Reload)
-	if res.IsError() {
-		return res.GetError()
+		// reload nginx
+		res = nginx.Control(nginx.Reload)
+		if res.IsError() {
+			return res.GetError()
+		}
 	}
 
 	// update ChatGPT history
@@ -92,10 +131,9 @@ func syncRename(oldName, newName string) {
 			}()
 			defer wg.Done()
 
-			client := resty.New()
+			client := nodeauth.NewRestyClient(node)
 			client.SetBaseURL(node.URL)
 			resp, err := client.R().
-				SetHeader("X-Node-Secret", node.Token).
 				SetBody(map[string]string{
 					"new_name": newName,
 				}).

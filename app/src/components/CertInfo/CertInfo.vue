@@ -13,6 +13,7 @@ const isValid = computed(() => dayjs().isAfter(props.cert?.not_before) && dayjs(
   <ACard
     v-if="cert"
     size="small"
+    :styles="{ body: { padding: '12px' } }"
   >
     <template #title>
       {{ cert.subject_name }}
@@ -35,16 +36,10 @@ const isValid = computed(() => dayjs().isAfter(props.cert?.not_before) && dayjs(
       {{ $gettext('Issuer: %{issuer}', { issuer: cert.issuer_name }) }}
     </p>
     <p>
-      {{ $gettext('Expired At: %{date}', { date: dayjs(cert.not_after).format('YYYY-MM-DD HH:mm:ss').toString() }) }}
+      {{ $gettext('Expires At: %{date}', { date: dayjs(cert.not_after).format('YYYY-MM-DD HH:mm:ss').toString() }) }}
     </p>
     <p class="mb-0">
       {{ $gettext('Not Valid Before: %{date}', { date: dayjs(cert.not_before).format('YYYY-MM-DD HH:mm:ss').toString() }) }}
     </p>
   </ACard>
 </template>
-
-<style lang="less" scoped>
-:deep(.ant-card-body) {
-  padding: 12px !important;
-}
-</style>

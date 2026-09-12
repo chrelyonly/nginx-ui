@@ -26,7 +26,7 @@ function downloadCsv(header: any, data: any[], fileName: string) {
   data.forEach((item, index) => {
     let dataString = ''
     for (const element of keys)
-      dataString += `${item[element]},`
+      dataString = dataString.concat(String(item[element]), ',')
 
     csvContent += index < data.length ? dataString.replace(/,$/, '\n') : dataString.replace(/,$/, '')
   })
@@ -75,3 +75,4 @@ export {
 }
 
 export { clearFingerprintCache, getBrowserFingerprint } from './fingerprint'
+export { getBrowserLanguage } from './i18n'

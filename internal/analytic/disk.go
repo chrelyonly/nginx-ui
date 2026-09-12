@@ -9,38 +9,62 @@ import (
 	"github.com/spf13/cast"
 )
 
-func GetDiskStat() (DiskStat, error) {
-	// Get all partitions
+func getVisiblePartitions() ([]disk.PartitionStat, error) {
 	partitions, err := disk.Partitions(false)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(partitions) > 0 {
+		return partitions, nil
+	}
+
+	partitions, err = disk.Partitions(true)
+	if err != nil {
+		return nil, err
+	}
+
+	return partitions, nil
+}
+
+func GetDiskStat() (DiskStat, error) {
+	partitions, err := getVisiblePartitions()
 	if err != nil {
 		return DiskStat{}, errors.Wrap(err, "error analytic getDiskStat - getting partitions")
 	}
 
+	return buildDiskStat(partitions, disk.Usage, getFilesystemKey), nil
+}
+
+type diskUsageFunc func(path string) (*disk.UsageStat, error)
+type filesystemKeyFunc func(partition disk.PartitionStat, usage *disk.UsageStat) (string, error)
+
+func buildDiskStat(partitions []disk.PartitionStat, getUsage diskUsageFunc, getKey filesystemKeyFunc) DiskStat {
 	var totalSize uint64
 	var totalUsed uint64
 	var partitionStats []PartitionStat
-	// Track partitions to avoid double counting same partition with multiple mount points
-	partitionUsage := make(map[string]*disk.UsageStat)
+	seenFilesystems := make(map[string]struct{})
 
-	// Get usage for each partition
 	for _, partition := range partitions {
-		usage, err := disk.Usage(partition.Mountpoint)
-		if err != nil {
-			// Skip partitions that can't be accessed
-			continue
-		}
-
-		// Skip virtual filesystems and special filesystems
+		// Filter before probing. getUsage is a statfs syscall per mount and this
+		// runs once a second for every open analytics stream; when
+		// getVisiblePartitions falls back to listing all mounts - which is the
+		// normal case inside a container, where the nodev filter hides overlay
+		// and tmpfs - probing first would statfs procfs, sysfs and every cgroup
+		// mount just to discard them, and would block on a hung network mount.
 		if isVirtualFilesystem(partition.Fstype) {
 			continue
 		}
 
-		// Skip OS-specific paths that shouldn't be counted
 		if shouldSkipPath(partition.Mountpoint, partition.Device) {
 			continue
 		}
 
-		// Create partition stat for display purposes
+		usage, err := getUsage(partition.Mountpoint)
+		if err != nil {
+			continue
+		}
+
 		partitionStat := PartitionStat{
 			Mountpoint: partition.Mountpoint,
 			Device:     partition.Device,
@@ -52,29 +76,45 @@ func GetDiskStat() (DiskStat, error) {
 		}
 		partitionStats = append(partitionStats, partitionStat)
 
-		// Only count each partition device once for total calculation
-		// This handles cases where same partition is mounted multiple times (e.g., bind mounts, overlayfs)
-		if _, exists := partitionUsage[partition.Device]; !exists {
-			partitionUsage[partition.Device] = usage
+		key, err := getKey(partition, usage)
+		if err != nil || key == "" {
+			key = fallbackFilesystemKey(partition)
+		}
+		if _, exists := seenFilesystems[key]; !exists {
+			seenFilesystems[key] = struct{}{}
 			totalSize += usage.Total
 			totalUsed += usage.Used
 		}
 	}
 
-	// Calculate overall percentage
 	var overallPercentage float64
 	if totalSize > 0 {
 		overallPercentage = cast.ToFloat64(fmt.Sprintf("%.2f", float64(totalUsed)/float64(totalSize)*100))
+	}
+	var writes, reads Usage[uint64]
+	if len(DiskWriteRecord) > 0 {
+		writes = DiskWriteRecord[len(DiskWriteRecord)-1]
+	}
+	if len(DiskReadRecord) > 0 {
+		reads = DiskReadRecord[len(DiskReadRecord)-1]
 	}
 
 	return DiskStat{
 		Used:       humanize.IBytes(totalUsed),
 		Total:      humanize.IBytes(totalSize),
 		Percentage: overallPercentage,
-		Writes:     DiskWriteRecord[len(DiskWriteRecord)-1],
-		Reads:      DiskReadRecord[len(DiskReadRecord)-1],
+		Writes:     writes,
+		Reads:      reads,
 		Partitions: partitionStats,
-	}, nil
+	}
+}
+
+func fallbackFilesystemKey(partition disk.PartitionStat) string {
+	if partition.Device != "" {
+		return "device:" + partition.Device
+	}
+
+	return "mountpoint:" + partition.Mountpoint
 }
 
 // isVirtualFilesystem checks if the filesystem type is virtual

@@ -4,10 +4,23 @@
 
 # Nginx UI
 
+[![MCP Toplist](https://mcptoplist.com/badge/mcp.so%2Fnginx-ui%2F0xJacky.svg)](https://mcptoplist.com/server/mcp.so%2Fnginx-ui%2F0xJacky)
+
 Yet another Nginx Web UI, developed by [0xJacky](https://jackyu.cn/), [Hintay](https://blog.kugeek.com/) and [Akino](https://github.com/akinoccc).
 
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-0xJacky%2Fnginx--ui-blue.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAyCAYAAAAnWDnqAAAAAXNSR0IArs4c6QAAA05JREFUaEPtmUtyEzEQhtWTQyQLHNak2AB7ZnyXZMEjXMGeK/AIi+QuHrMnbChYY7MIh8g01fJoopFb0uhhEqqcbWTp06/uv1saEDv4O3n3dV60RfP947Mm9/SQc0ICFQgzfc4CYZoTPAswgSJCCUJUnAAoRHOAUOcATwbmVLWdGoH//PB8mnKqScAhsD0kYP3j/Yt5LPQe2KvcXmGvRHcDnpxfL2zOYJ1mFwrryWTz0advv1Ut4CJgf5uhDuDj5eUcAUoahrdY/56ebRWeraTjMt/00Sh3UDtjgHtQNHwcRGOC98BJEAEymycmYcWwOprTgcB6VZ5JK5TAJ+fXGLBm3FDAmn6oPPjR4rKCAoJCal2eAiQp2x0vxTPB3ALO2CRkwmDy5WohzBDwSEFKRwPbknEggCPB/imwrycgxX2NzoMCHhPkDwqYMr9tRcP5qNrMZHkVnOjRMWwLCcr8ohBVb1OMjxLwGCvjTikrsBOiA6fNyCrm8V1rP93iVPpwaE+gO0SsWmPiXB+jikdf6SizrT5qKasx5j8ABbHpFTx+vFXp9EnYQmLx02h1QTTrl6eDqxLnGjporxl3NL3agEvXdT0WmEost648sQOYAeJS9Q7bfUVoMGnjo4AZdUMQku50McDcMWcBPvr0SzbTAFDfvJqwLzgxwATnCgnp4wDl6Aa+Ax283gghmj+vj7feE2KBBRMW3FzOpLOADl0Isb5587h/U4gGvkt5v60Z1VLG8BhYjbzRwyQZemwAd6cCR5/XFWLYZRIMpX39AR0tjaGGiGzLVyhse5C9RKC6ai42ppWPKiBagOvaYk8lO7DajerabOZP46Lby5wKjw1HCRx7p9sVMOWGzb/vA1hwiWc6jm3MvQDTogQkiqIhJV0nBQBTU+3okKCFDy9WwferkHjtxib7t3xIUQtHxnIwtx4mpg26/HfwVNVDb4oI9RHmx5WGelRVlrtiw43zboCLaxv46AZeB3IlTkwouebTr1y2NjSpHz68WNFjHvupy3q8TFn3Hos2IAk4Ju5dCo8B3wP7VPr/FGaKiG+T+v+TQqIrOqMTL1VdWV1DdmcbO8KXBz6esmYWYKPwDL5b5FA1a0hwapHiom0r/cKaoqr+27/XcrS5UwSMbQAAAABJRU5ErkJggg==)](https://deepwiki.com/0xJacky/nginx-ui)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/0xJacky/nginx-ui)
+
+[![Documentation](https://img.shields.io/badge/Documentation-nginxui.com-1f6feb?logo=readthedocs&logoColor=white)](https://nginxui.com)
+
+<p>
+  <a href="https://atomgit.com/uozi/nginx-ui" target="_blank" title="This project is part of the AtomGit G-Star program">
+    <img src="resources/atomgit-logo.svg" alt="AtomGit" height="20" align="middle">
+  </a>
+  &nbsp;Proudly hosted on <a href="https://atomgit.com/uozi/nginx-ui">AtomGit</a> — a part of the <b>G-Star</b> program.
+</p>
+
+[![AtomGit Stars](https://atomgit.com/uozi/nginx-ui/star/badge.svg)](https://atomgit.com/uozi/nginx-ui)
 
 [![Build and Publish](https://github.com/0xJacky/nginx-ui/actions/workflows/build.yml/badge.svg)](https://github.com/0xJacky/nginx-ui/actions/workflows/build.yml)
 [![GitHub license](https://img.shields.io/github/license/0xJacky/nginx-ui?label=License&logo=github)](https://github.com/0xJacky/nginx-ui "Click to view the repo on Github")
@@ -21,7 +34,6 @@ Yet another Nginx Web UI, developed by [0xJacky](https://jackyu.cn/), [Hintay](h
 [![Docker Pulls](https://img.shields.io/docker/pulls/uozi/nginx-ui?label=Pulls&logo=docker)](https://hub.docker.com/r/uozi/nginx-ui "Click to view the image on Docker Hub")
 [![Image Size](https://img.shields.io/docker/image-size/uozi/nginx-ui/latest?label=Image%20Size&logo=docker)](https://hub.docker.com/r/uozi/nginx-ui "Click to view the image on Docker Hub")
 
-[![Translated Status](https://weblate.nginxui.com/widget/nginx-ui/frontend/svg-badge.svg)](https://weblate.nginxui.com/engage/nginx-ui/)
 [![Featured｜HelloGitHub](https://abroad.hellogithub.com/v1/widgets/recommend.svg?rid=86f3a8f779934748a34fe6f1b5cd442f&claim_uid=MOFqadzAShCBeQj&theme=small)](https://hellogithub.com/repository/86f3a8f779934748a34fe6f1b5cd442f)
 
 ## Documentation
@@ -33,6 +45,24 @@ If you find this project helpful, please consider sponsoring us to support ongoi
 
 [![GitHub Sponsors](https://img.shields.io/badge/GitHub-Sponsors-ea4aaa?style=for-the-badge&logo=github-sponsors&logoColor=white)](https://github.com/sponsors/nginxui)
 [![Afdian](https://img.shields.io/badge/爱发电-Support-946ce6?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEyIDJMMTMuMDkgOC4yNkwyMCA5TDEzLjA5IDE1Ljc0TDEyIDIyTDEwLjkxIDE1Ljc0TDQgOUwxMC45MSA4LjI2TDEyIDJaIiBmaWxsPSJ3aGl0ZSIvPgo8L3N2Zz4K)](https://afdian.com/a/nginxui)
+
+### Sponsors
+
+<a href="https://www.axisnow.io/" target="_blank">
+  <img src="resources/axisnow-logo.png" alt="AxisNow" width="220px">
+</a>
+
+Protect and accelerate websites and APIs with consistent access performance across mainland China and worldwide, and extend acceleration and security to native and mobile apps through client SDKs — **Self-hosted private CDN｜Subscription-based anti-DDoS CDN｜A self-controlled, flexibly composable CDN network.**
+
+### Official Community Group
+
+Join the official Nginx UI WeChat community group to discuss usage, deployment ideas, and troubleshooting with other community members.
+
+Scan the QR code below to add us on WeChat, and include `Nginx UI Community Group` in your request. The administrator will invite you to the official community group.
+
+<p align="center">
+  <img src="docs/public/assets/wechat-community-qr.png" alt="Nginx UI WeChat Community QR Code" width="320">
+</p>
 
 Your support helps us:
 - 🚀 Accelerate the development of new features
@@ -52,7 +82,7 @@ Thanks to [JetBrains](https://www.jetbrains.com/?from=nginx-ui) for supporting u
 
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/0xJacky/nginx-ui.svg)](https://starchart.cc/0xJacky/nginx-ui)
+[![Stargazers over time](https://cloud.nginxui.com/stars/0xJacky/nginx-ui.svg)](https://cloud.nginxui.com/stars/0xJacky/nginx-ui.svg)
 
 English | [Español](resources/readme/README-es.md) | [简体中文](resources/readme/README-zh_CN.md) | [繁體中文](resources/readme/README-zh_TW.md) | [Tiếng Việt](resources/readme/README-vi_VN.md) | [日本語](resources/readme/README-ja_JP.md)
 
@@ -158,7 +188,7 @@ http {
 }
 ```
 
-For more information: [debian/conf/nginx.conf](https://salsa.debian.org/nginx-team/nginx/-/blob/master/debian/conf/nginx.conf#L59-L60)
+For more information: [debian/conf/nginx.conf](https://salsa.debian.org/nginx-team/nginx/-/blob/debian/latest/debian/conf/nginx.conf#L60-L61)
 
 ### Installation
 
@@ -226,6 +256,7 @@ you can easily make the switch.
 ##### Note
 1. When using this container for the first time, ensure that the volume mapped to /etc/nginx is empty.
 2. If you want to host static files, you can map directories to container.
+3. If you are upgrading from an older image, see the [Docker WebSocket fix guide](https://nginxui.com/guide/docker-websocket-fix.html) for required `conf.d/nginx-ui.conf` updates.
 
 <details>
 <summary><b>Deploy with Docker</b></summary>
@@ -247,6 +278,7 @@ docker run -dit \
 ```
 
 3. When your docker container is running, Log in to nginx-ui panel with `http://<your_server_ip>:8080/install`.
+   If you change the port mapping, access Nginx UI through the host port mapped to container port `80` instead.
 </details>
 
 <details>
@@ -282,6 +314,7 @@ docker compose up -d
 ```
 
 4. When your docker container is running, Log in to nginx-ui panel with `http://<your_server_ip>:8080/install`.
+   If you change the port mapping, access Nginx UI through the host port mapped to container port `80` instead.
 
 </details>
 
@@ -306,8 +339,8 @@ On platforms that do not have an official build version, they can be built manua
 Please execute the following command in `app` directory.
 
 ```shell
-pnpm install
-pnpm build
+bun install
+bun run build
 ```
 
 ### Build Backend

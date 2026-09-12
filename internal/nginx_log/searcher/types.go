@@ -3,16 +3,14 @@ package searcher
 import (
 	"context"
 	"time"
-
-	"github.com/blevesearch/bleve/v2"
-	"github.com/blevesearch/bleve/v2/search/query"
 )
 
 // SearcherConfig holds configuration for the searcher
 type Config struct {
 	MaxConcurrency     int           `json:"max_concurrency"`
 	TimeoutDuration    time.Duration `json:"timeout_duration"`
-	CacheSize          int           `json:"cache_size"`
+	CacheSize          int           `json:"cache_size"` // KiB of serialized search results
+	MemoryQuota        int64         `json:"memory_quota"`
 	EnableCache        bool          `json:"enable_cache"`
 	DefaultLimit       int           `json:"default_limit"`
 	MaxLimit           int           `json:"max_limit"`
@@ -26,7 +24,8 @@ func DefaultSearcherConfig() *Config {
 	return &Config{
 		MaxConcurrency:     10,
 		TimeoutDuration:    30 * time.Second,
-		CacheSize:          1000,
+		CacheSize:          64 * 1024,
+		MemoryQuota:        defaultSearchMemoryQuota,
 		EnableCache:        true,
 		DefaultLimit:       50,
 		MaxLimit:           10000,
@@ -36,15 +35,6 @@ func DefaultSearcherConfig() *Config {
 	}
 }
 
-// SearchCache defines the interface for search result caching
-type SearchCache interface {
-	Get(req *SearchRequest) *SearchResult
-	Put(req *SearchRequest, result *SearchResult, ttl time.Duration)
-	Clear()
-	GetStats() *CacheStats
-	Close()
-}
-
 // SearchRequest represents a search query request
 type SearchRequest struct {
 	// Query parameters
@@ -52,20 +42,21 @@ type SearchRequest struct {
 	Fields []string `json:"fields,omitempty"`
 
 	// Filters
-	LogPaths          []string `json:"log_paths,omitempty"`
-	UseMainLogPath    bool     `json:"use_main_log_path,omitempty"` // Use main_log_path field instead of file_path for log group queries
-	StartTime         *int64   `json:"start_time,omitempty"`         // Unix timestamp
-	EndTime           *int64   `json:"end_time,omitempty"`           // Unix timestamp
-	IPAddresses []string `json:"ip_addresses,omitempty"`
-	Methods     []string `json:"methods,omitempty"`
-	StatusCodes []int    `json:"status_codes,omitempty"`
-	Paths       []string `json:"paths,omitempty"`
-	UserAgents  []string `json:"user_agents,omitempty"`
-	Referers    []string `json:"referers,omitempty"`
-	Countries   []string `json:"countries,omitempty"`
-	Browsers    []string `json:"browsers,omitempty"`
-	OSs         []string `json:"operating_systems,omitempty"`
-	Devices     []string `json:"devices,omitempty"`
+	LogPaths       []string `json:"log_paths,omitempty"`
+	UseMainLogPath bool     `json:"use_main_log_path,omitempty"` // Use main_log_path field instead of file_path for log group queries
+	StartTime      *int64   `json:"start_time,omitempty"`        // Unix timestamp
+	EndTime        *int64   `json:"end_time,omitempty"`          // Unix timestamp
+	IPAddresses    []string `json:"ip_addresses,omitempty"`
+	Methods        []string `json:"methods,omitempty"`
+	StatusCodes    []int    `json:"status_codes,omitempty"`
+	Paths          []string `json:"paths,omitempty"`
+	UserAgents     []string `json:"user_agents,omitempty"`
+	Referers       []string `json:"referers,omitempty"`
+	Countries      []string `json:"countries,omitempty"`
+	Provinces      []string `json:"provinces,omitempty"`
+	Browsers       []string `json:"browsers,omitempty"`
+	OSs            []string `json:"operating_systems,omitempty"`
+	Devices        []string `json:"devices,omitempty"`
 
 	// Range filters
 	MinBytes   *int64   `json:"min_bytes,omitempty"`
@@ -76,6 +67,12 @@ type SearchRequest struct {
 	// Pagination
 	Limit  int `json:"limit"`
 	Offset int `json:"offset"`
+
+	// SearchAfter enables cursor-based pagination: pass the Sort values of the
+	// last hit from the previous page. Unlike Offset it stays O(page) per
+	// request instead of materializing offset+limit candidates. When set,
+	// Offset is ignored.
+	SearchAfter []string `json:"search_after,omitempty"`
 
 	// Sorting
 	SortBy    string `json:"sort_by,omitempty"`
@@ -112,7 +109,7 @@ type SearchResult struct {
 	// Cache info
 	FromCache bool `json:"from_cache,omitempty"`
 	CacheHit  bool `json:"cache_hit,omitempty"`
-	
+
 	// Warning message for deep pagination or other issues
 	Warning string `json:"warning,omitempty"`
 }
@@ -124,6 +121,7 @@ type SearchHit struct {
 	Fields       map[string]interface{} `json:"fields"`
 	Highlighting map[string][]string    `json:"highlighting,omitempty"`
 	Index        string                 `json:"index,omitempty"` // Shard identifier
+	Sort         []string               `json:"sort,omitempty"`  // Sort values, usable as SearchAfter cursor
 }
 
 // ShardResult represents results from a single shard
@@ -164,55 +162,19 @@ type SearchStats struct {
 	UniquePaths    int            `json:"unique_paths"`
 	StatusCodeDist map[string]int `json:"status_code_distribution"`
 	MethodDist     map[string]int `json:"method_distribution"`
-}
 
-// AggregationRequest represents a request for aggregated data
-type AggregationRequest struct {
-	Field      string            `json:"field"`
-	Type       AggregationType   `json:"type"`
-	Size       int               `json:"size,omitempty"`
-	Interval   string            `json:"interval,omitempty"`    // For date histograms
-	DateFormat string            `json:"date_format,omitempty"` // For date formatting
-	Filters    map[string]string `json:"filters,omitempty"`
-}
+	// ScannedDocs is the number of documents actually read to build these
+	// statistics. It equals the match count unless the scan hit its cap.
+	ScannedDocs uint64 `json:"scanned_docs"`
 
-// AggregationType defines the type of aggregation
-type AggregationType string
-
-const (
-	AggregationTerms         AggregationType = "terms"
-	AggregationHistogram     AggregationType = "histogram"
-	AggregationDateHistogram AggregationType = "date_histogram"
-	AggregationStats         AggregationType = "stats"
-	AggregationCardinality   AggregationType = "cardinality"
-)
-
-// CacheEntry represents a cached search result
-type CacheEntry struct {
-	Result    *SearchResult `json:"result"`
-	CreatedAt time.Time     `json:"created_at"`
-	ExpiresAt time.Time     `json:"expires_at"`
-	HitCount  int64         `json:"hit_count"`
-	Size      int64         `json:"size"` // Estimated memory size in bytes
-}
-
-// ShardSearcher defines the interface for searching individual shards
-type ShardSearcher interface {
-	Search(ctx context.Context, shardID int, req *SearchRequest) (*SearchResult, error)
-	GetShardInfo(shardID int) (*ShardInfo, error)
-	IsShardHealthy(shardID int) bool
+	// Approximate reports that the scan covered only a prefix of the match set
+	// and the totals were extrapolated from it.
+	Approximate bool `json:"approximate"`
 }
 
 // SearcherInterface defines the main search interface
 type SearcherInterface interface {
 	Search(ctx context.Context, req *SearchRequest) (*SearchResult, error)
-	SearchAsync(ctx context.Context, req *SearchRequest) (<-chan *SearchResult, <-chan error)
-
-	Aggregate(ctx context.Context, req *AggregationRequest) (*AggregationResult, error)
-
-	Suggest(ctx context.Context, text string, field string, size int) ([]*Suggestion, error)
-
-	Analyze(ctx context.Context, text string, analyzer string) ([]string, error)
 
 	ClearCache() error
 	GetCacheStats() *CacheStats
@@ -222,22 +184,6 @@ type SearcherInterface interface {
 	GetStats() *Stats
 	GetConfig() *Config
 	Stop() error
-}
-
-// AggregationResult represents the result of an aggregation
-type AggregationResult struct {
-	Field    string          `json:"field"`
-	Type     AggregationType `json:"type"`
-	Total    int             `json:"total"`
-	Data     interface{}     `json:"data"`
-	Duration time.Duration   `json:"duration"`
-}
-
-// Suggestion represents a search suggestion
-type Suggestion struct {
-	Text  string  `json:"text"`
-	Score float64 `json:"score"`
-	Freq  int64   `json:"freq"`
 }
 
 // Stats provides comprehensive search statistics
@@ -273,60 +219,6 @@ type ShardInfo struct {
 	LastUpdated   int64  `json:"last_updated"`
 }
 
-// QueryBuilderInterface for complex queries
-type QueryBuilderInterface interface {
-	Query() query.Query
-}
-
-// BoolQueryBuilder builds boolean queries
-type BoolQueryBuilder struct {
-	must    []query.Query
-	mustNot []query.Query
-	should  []query.Query
-}
-
-// NewBoolQueryBuilder creates a new boolean query builder
-func NewBoolQueryBuilder() *BoolQueryBuilder {
-	return &BoolQueryBuilder{}
-}
-
-// Must adds a must clause
-func (b *BoolQueryBuilder) Must(q query.Query) *BoolQueryBuilder {
-	b.must = append(b.must, q)
-	return b
-}
-
-// MustNot adds a must not clause
-func (b *BoolQueryBuilder) MustNot(q query.Query) *BoolQueryBuilder {
-	b.mustNot = append(b.mustNot, q)
-	return b
-}
-
-// Should adds a should clause
-func (b *BoolQueryBuilder) Should(q query.Query) *BoolQueryBuilder {
-	b.should = append(b.should, q)
-	return b
-}
-
-// Query builds the final boolean query
-func (b *BoolQueryBuilder) Query() query.Query {
-	boolQuery := bleve.NewBooleanQuery()
-
-	for _, q := range b.must {
-		boolQuery.AddMust(q)
-	}
-
-	for _, q := range b.mustNot {
-		boolQuery.AddMustNot(q)
-	}
-
-	for _, q := range b.should {
-		boolQuery.AddShould(q)
-	}
-
-	return boolQuery
-}
-
 // Search operation constants
 const (
 	DefaultSortField = "_score"
@@ -335,7 +227,7 @@ const (
 
 	// Cache constants
 	DefaultCacheTTL = 5 * time.Minute
-	MaxCacheSize    = 10000
+	MaxCacheSize    = 256 * 1024
 
 	// Facet constants
 	DefaultFacetSize = 10

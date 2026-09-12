@@ -5,10 +5,10 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/0xJacky/Nginx-UI/internal/nodeauth"
 	"github.com/0xJacky/Nginx-UI/internal/notification"
 	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/0xJacky/Nginx-UI/query"
-	"github.com/go-resty/resty/v2"
 	"github.com/uozi-tech/cosy/logger"
 )
 
@@ -44,13 +44,12 @@ func syncReload(nodeIDs []uint64) {
 			}()
 			defer wg.Done()
 
-			client := resty.New()
+			client := nodeauth.NewRestyClient(node)
 			client.SetBaseURL(node.URL)
 			resp, err := client.R().
-				SetHeader("X-Node-Secret", node.Token).
 				Post("/api/nginx/reload")
 			if err != nil {
-				notification.Error("Reload Remote Nginx Error", "", err.Error())
+				notification.Error("Reload Remote Nginx Error", err.Error(), nil)
 				return
 			}
 			if resp.StatusCode() != http.StatusOK {
@@ -98,13 +97,12 @@ func syncRestart(nodeIDs []uint64) {
 			}()
 			defer wg.Done()
 
-			client := resty.New()
+			client := nodeauth.NewRestyClient(node)
 			client.SetBaseURL(node.URL)
 			resp, err := client.R().
-				SetHeader("X-Node-Secret", node.Token).
 				Post("/api/nginx/restart")
 			if err != nil {
-				notification.Error("Restart Remote Nginx Error", "", err.Error())
+				notification.Error("Restart Remote Nginx Error", err.Error(), nil)
 				return
 			}
 			if resp.StatusCode() != http.StatusOK {

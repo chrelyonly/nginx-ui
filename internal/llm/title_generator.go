@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/0xJacky/Nginx-UI/settings"
 	"github.com/sashabaranov/go-openai"
@@ -38,10 +39,9 @@ Respond only with the title, no additional text or formatting.`,
 	}
 
 	req := openai.ChatCompletionRequest{
-		Model:       settings.OpenAISettings.Model,
-		Messages:    []openai.ChatCompletionMessage{systemMessage, userMessage},
-		MaxTokens:   20, // Keep it short
-		Temperature: 0.3, // Lower temperature for more consistent titles
+		Model:               settings.OpenAISettings.Model,
+		Messages:            []openai.ChatCompletionMessage{systemMessage, userMessage},
+		MaxCompletionTokens: 20, // Keep it short
 	}
 
 	resp, err := client.CreateChatCompletion(context.Background(), req)
@@ -55,10 +55,10 @@ Respond only with the title, no additional text or formatting.`,
 	}
 
 	title := strings.TrimSpace(resp.Choices[0].Message.Content)
-	
+
 	// Sanitize the title
 	title = sanitizeTitle(title)
-	
+
 	if title == "" {
 		return "New Session", nil
 	}
@@ -75,7 +75,7 @@ func extractContextForTitleGeneration(messages []openai.ChatCompletionMessage) s
 	var contextBuilder strings.Builder
 	messageCount := 0
 	maxMessages := 3 // Only use the first few messages for context
-	maxLength := 800  // Limit total context length
+	maxLength := 800 // Limit total context length
 
 	for _, message := range messages {
 		if messageCount >= maxMessages {
@@ -102,12 +102,10 @@ func extractContextForTitleGeneration(messages []openai.ChatCompletionMessage) s
 		}
 
 		// Truncate very long messages
-		if len(content) > 200 {
-			content = content[:200] + "..."
-		}
+		content = truncateRunes(content, 200)
 
 		newContent := fmt.Sprintf("%s%s\n", rolePrefix, content)
-		
+
 		// Check if adding this message would exceed the max length
 		if contextBuilder.Len()+len(newContent) > maxLength {
 			break
@@ -120,29 +118,50 @@ func extractContextForTitleGeneration(messages []openai.ChatCompletionMessage) s
 	return contextBuilder.String()
 }
 
+// truncateRunes shortens a string to at most maxRunes runes and appends an
+// ellipsis when anything was cut. Counting runes rather than bytes matters
+// because a byte-indexed cut lands in the middle of a multi-byte character for
+// any non-ASCII text (Chinese, Japanese, Cyrillic, emoji, accented Latin) and
+// leaves an invalid UTF-8 sequence behind, which the UI renders as U+FFFD.
+func truncateRunes(value string, maxRunes int) string {
+	if maxRunes <= 0 || utf8.RuneCountInString(value) <= maxRunes {
+		return value
+	}
+
+	count := 0
+	for offset := range value {
+		if count == maxRunes {
+			return value[:offset] + "..."
+		}
+		count++
+	}
+
+	return value
+}
+
 // sanitizeTitle cleans up the generated title
 func sanitizeTitle(title string) string {
 	// Remove quotes if present
 	title = strings.Trim(title, `"'`)
-	
+
 	// Remove any prefix like "Title: " if present
 	if strings.HasPrefix(strings.ToLower(title), "title:") {
 		title = strings.TrimSpace(title[6:])
 	}
-	
+
 	// Limit length
-	if len(title) > 50 {
-		title = title[:47] + "..."
+	if utf8.RuneCountInString(title) > 50 {
+		title = truncateRunes(title, 47)
 	}
-	
+
 	// Replace any problematic characters
 	title = strings.ReplaceAll(title, "\n", " ")
 	title = strings.ReplaceAll(title, "\r", " ")
-	
+
 	// Collapse multiple spaces
 	for strings.Contains(title, "  ") {
 		title = strings.ReplaceAll(title, "  ", " ")
 	}
-	
+
 	return strings.TrimSpace(title)
 }

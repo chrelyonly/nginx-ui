@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
 
 	"github.com/0xJacky/Nginx-UI/internal/helper"
@@ -12,7 +11,7 @@ import (
 	"gorm.io/gen/field"
 )
 
-func Save(absPath string, content string, cfg *model.Config) (err error) {
+func Save(absPath string, content string, cfg *model.Config, userNames ...string) (err error) {
 	q := query.Config
 	if cfg == nil {
 		cfg, err = q.Assign(field.Attrs(&model.Config{
@@ -28,22 +27,38 @@ func Save(absPath string, content string, cfg *model.Config) (err error) {
 		return cosy.WrapErrorWithParams(ErrPathIsNotUnderTheNginxConfDir, absPath, nginx.GetConfPath())
 	}
 
+	err = ValidateConfigFile(absPath, content)
+	if err != nil {
+		return
+	}
+
 	err = CheckAndCreateHistory(absPath, content)
 	if err != nil {
 		return
 	}
 
-	err = os.WriteFile(absPath, []byte(content), 0644)
-	if err != nil {
+	// Hold the apply lock for the whole write -> test -> reload sequence so a
+	// concurrent mutation cannot make this save fail on somebody else's file.
+	release := LockApply()
+	defer release()
+
+	tx := &FileTransaction{}
+	if err = tx.Write(absPath, []byte(content), 0644); err != nil {
+		return RollbackError(err, tx.Rollback)
+	}
+
+	// Reloading without `nginx -t` would leave content Nginx rejects on disk:
+	// the running instance keeps its valid in-memory configuration, so the
+	// failure is deferred to the next Nginx start. Test first and roll back.
+	if err = tx.TestAndReload(); err != nil {
 		return
 	}
 
-	res := nginx.Control(nginx.Reload)
-	if res.IsError() {
-		return res.GetError()
+	userName := ""
+	if len(userNames) > 0 {
+		userName = userNames[0]
 	}
-
-	err = SyncToRemoteServer(cfg)
+	err = SyncToRemoteServer(cfg, userName)
 	if err != nil {
 		return
 	}

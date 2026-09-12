@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { SelectProps } from 'antdv-next'
 import dayjs from 'dayjs'
 import loadTranslations from '@/api/translations'
 import gettext from '@/gettext'
@@ -19,6 +20,11 @@ const current = computed({
 })
 
 const languageAvailable = gettext.available
+
+const languageOptions = computed<SelectProps['options']>(() => Object.entries(languageAvailable).map(([key, language]) => ({
+  label: language,
+  value: key,
+})))
 
 function updateTitle() {
   const name = route.meta.name as never as () => string
@@ -55,6 +61,7 @@ const localeMap: Record<string, string> = {
   ru: 'ru',
   tr: 'tr',
   vi: 'vi',
+  uk_UA: 'uk',
 }
 
 // Predefined locale importers for dynamic loading
@@ -73,6 +80,7 @@ const localeImporters = {
   'ru': () => import('dayjs/locale/ru'),
   'tr': () => import('dayjs/locale/tr'),
   'vi': () => import('dayjs/locale/vi'),
+  'uk': () => import('dayjs/locale/uk'),
 }
 
 // Dynamically load dayjs locale files
@@ -117,17 +125,10 @@ watch(current, init)
   <div>
     <ASelect
       v-model:value="current"
+      :options="languageOptions"
       size="small"
       style="width: 60px"
-    >
-      <ASelectOption
-        v-for="(language, key) in languageAvailable"
-        :key="key"
-        :value="key"
-      >
-        {{ language }}
-      </ASelectOption>
-    </ASelect>
+    />
   </div>
 </template>
 

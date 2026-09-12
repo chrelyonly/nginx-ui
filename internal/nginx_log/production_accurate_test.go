@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/0xJacky/Nginx-UI/internal/nginx_log/indexer"
+	"github.com/0xJacky/Nginx-UI/settings"
 )
 
 // TestAccurateProductionPerformance tests the exact same workflow as production rebuild
@@ -17,13 +18,13 @@ func TestAccurateProductionPerformance(t *testing.T) {
 		t.Skip("Skipping accurate production performance test in short mode")
 	}
 
-	// Test with realistic scales matching your production usage
+	// Keep regular tests focused on production workflow correctness. Large-scale
+	// indexing belongs in benchmarks and should not slow down go test.
 	testSizes := []struct {
 		name    string
 		records int
 	}{
-		{"Production_50K", 50000},   // Smaller scale for quick validation
-		{"Production_100K", 100000}, // Medium scale
+		{"Smoke_1K", 1000},
 	}
 
 	for _, testSize := range testSizes {
@@ -38,11 +39,20 @@ func runAccurateProductionTest(t *testing.T, recordCount int) {
 
 	tempDir := t.TempDir()
 
+	// IndexLogGroupWithProgress validates every file against the log directory
+	// whitelist, so the temp dir must be whitelisted for the test files to be found.
+	originalWhitelist := settings.NginxSettings.LogDirWhiteList
+	settings.NginxSettings.LogDirWhiteList = append(append([]string{}, originalWhitelist...), tempDir)
+	t.Cleanup(func() {
+		settings.NginxSettings.LogDirWhiteList = originalWhitelist
+	})
+
 	// Generate test data with production-like log entries
 	testLogFile := filepath.Join(tempDir, "access.log")
 	dataGenStart := time.Now()
 
-	if err := generateProductionLikeLogFile(testLogFile, recordCount); err != nil {
+	expectedMinTime, expectedMaxTime, err := generateProductionLikeLogFile(testLogFile, recordCount)
+	if err != nil {
 		t.Fatalf("Failed to generate test data: %v", err)
 	}
 
@@ -54,6 +64,9 @@ func runAccurateProductionTest(t *testing.T, recordCount int) {
 	if err := os.MkdirAll(indexDir, 0755); err != nil {
 		t.Fatalf("Failed to create index dir: %v", err)
 	}
+
+	// Initialize the global log parser singleton, same as production startup does
+	indexer.InitLogParser()
 
 	// Use production default configuration
 	config := indexer.DefaultIndexerConfig()
@@ -74,17 +87,25 @@ func runAccurateProductionTest(t *testing.T, recordCount int) {
 
 	productionStart := time.Now()
 
-	// Create progress config (similar to production but with test logging)
+	// Create progress config (similar to production). The tracker dispatches both
+	// callbacks on their own goroutines, so they hand notifications back to the
+	// test goroutine instead of touching t directly — a t.Logf that lands after
+	// the test returns panics.
+	progressCh := make(chan indexer.ProgressNotification, 64)
+	completionCh := make(chan indexer.CompletionNotification, 1)
 	progressConfig := &indexer.ProgressConfig{
 		NotifyInterval: 1 * time.Second,
 		OnProgress: func(progress indexer.ProgressNotification) {
-			t.Logf("📈 Progress: %.1f%% - Files: %d/%d, Lines: %d/%d",
-				progress.Percentage, progress.CompletedFiles, progress.TotalFiles,
-				progress.ProcessedLines, progress.EstimatedLines)
+			select {
+			case progressCh <- progress:
+			default: // Drop notifications once the buffer is full
+			}
 		},
 		OnCompletion: func(completion indexer.CompletionNotification) {
-			t.Logf("✅ Completed: %s - Success: %t, Duration: %s, Lines: %d",
-				completion.LogGroupPath, completion.Success, completion.Duration, completion.TotalLines)
+			select {
+			case completionCh <- completion:
+			default:
+			}
 		},
 	}
 
@@ -96,6 +117,31 @@ func runAccurateProductionTest(t *testing.T, recordCount int) {
 	if err != nil {
 		t.Fatalf("IndexLogGroupWithProgress failed: %v", err)
 	}
+
+	// The completion callback is dispatched before IndexLogGroupWithProgress
+	// returns, so it only needs to be scheduled — the timeout is a guard against
+	// it never firing, not a performance bound.
+	var completion indexer.CompletionNotification
+	select {
+	case completion = <-completionCh:
+	case <-time.After(30 * time.Second):
+		t.Fatal("❌ Timed out waiting for the completion notification")
+	}
+
+drainProgress:
+	for {
+		select {
+		case progress := <-progressCh:
+			t.Logf("📈 Progress: %.1f%% - Files: %d/%d, Lines: %d/%d",
+				progress.Percentage, progress.CompletedFiles, progress.TotalFiles,
+				progress.ProcessedLines, progress.EstimatedLines)
+		default:
+			break drainProgress
+		}
+	}
+
+	t.Logf("✅ Completed: %s - Success: %t, Duration: %s, Lines: %d",
+		completion.LogGroupPath, completion.Success, completion.Duration, completion.TotalLines)
 
 	// Calculate metrics (same as production rebuild reporting)
 	var totalIndexedDocs uint64
@@ -121,22 +167,59 @@ func runAccurateProductionTest(t *testing.T, recordCount int) {
 		t.Logf("Warning: Flush failed: %v", err)
 	}
 
-	// Performance validation
-	if throughput < 1000 {
-		t.Errorf("⚠️  Throughput too low: %.0f records/sec (expected >1000 for production)", throughput)
+	// Throughput is reported, never asserted. The measured rate depends on how
+	// much CPU the rest of the test suite leaves behind (the full `go test ./...`
+	// run executes many package binaries at once) and drops by an order of
+	// magnitude under the race detector, so any absolute floor is a flake. Use
+	// `go test -bench` for performance numbers; this test guards correctness.
+	referenceThroughput := 1000.0
+	if raceEnabled {
+		referenceThroughput = 200.0
+	}
+	if throughput < referenceThroughput {
+		t.Logf("ℹ️  Throughput below the %.0f records/sec reference: %.0f records/sec (informational, machine load dependent)",
+			referenceThroughput, throughput)
 	}
 
-	if totalIndexedDocs == 0 {
-		t.Errorf("❌ No documents were indexed")
+	// Correctness validation: every generated record must be indexed exactly once.
+	if totalIndexedDocs != uint64(recordCount) {
+		t.Errorf("❌ Indexed %d documents, expected %d", totalIndexedDocs, recordCount)
 	}
 
-	t.Logf("✨ Test completed successfully - Production performance validated")
+	if len(docsCountMap) != 1 {
+		t.Errorf("❌ Processed %d files, expected 1", len(docsCountMap))
+	}
+
+	if !completion.Success {
+		t.Errorf("❌ Completion reported failure: %s (failed files: %d)", completion.Error, completion.FailedFiles)
+	}
+
+	if completion.TotalLines != int64(recordCount) {
+		t.Errorf("❌ Completion reported %d lines, expected %d", completion.TotalLines, recordCount)
+	}
+
+	// The indexed time range must cover exactly the span that was generated.
+	switch {
+	case minTime == nil || maxTime == nil:
+		t.Errorf("❌ Missing time range: min=%v, max=%v", minTime, maxTime)
+	case !minTime.Equal(expectedMinTime):
+		t.Errorf("❌ Min time is %s, expected %s", minTime.Format(time.RFC3339), expectedMinTime.Format(time.RFC3339))
+	case !maxTime.Equal(expectedMaxTime):
+		t.Errorf("❌ Max time is %s, expected %s", maxTime.Format(time.RFC3339), expectedMaxTime.Format(time.RFC3339))
+	}
+
+	t.Logf("✨ Test completed successfully - Production rebuild workflow validated")
 }
 
-func generateProductionLikeLogFile(filename string, recordCount int) error {
+// generateProductionLikeLogFile writes recordCount nginx combined-format lines and
+// returns the earliest and latest timestamp it wrote, so the caller can assert the
+// indexed time range without duplicating the generation logic.
+func generateProductionLikeLogFile(filename string, recordCount int) (time.Time, time.Time, error) {
+	var minTime, maxTime time.Time
+
 	file, err := os.Create(filename)
 	if err != nil {
-		return err
+		return minTime, maxTime, err
 	}
 	defer file.Close()
 
@@ -171,6 +254,14 @@ func generateProductionLikeLogFile(filename string, recordCount int) error {
 	for i := 0; i < recordCount; i++ {
 		// Distribute timestamps over 24 hours
 		timestamp := baseTime + int64(i%86400)
+		entryTime := time.Unix(timestamp, 0)
+		if minTime.IsZero() || entryTime.Before(minTime) {
+			minTime = entryTime
+		}
+		if maxTime.IsZero() || entryTime.After(maxTime) {
+			maxTime = entryTime
+		}
+
 		ip := ips[i%len(ips)]
 		method := methods[i%len(methods)]
 		path := paths[i%len(paths)]
@@ -200,9 +291,9 @@ func generateProductionLikeLogFile(filename string, recordCount int) error {
 		)
 
 		if _, err := fmt.Fprintln(file, logLine); err != nil {
-			return err
+			return minTime, maxTime, err
 		}
 	}
 
-	return nil
+	return minTime, maxTime, nil
 }

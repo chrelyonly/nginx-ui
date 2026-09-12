@@ -37,6 +37,11 @@ export interface AccessLogEntry {
   region_code: string
   province: string
   city: string
+  c1?: string
+  c2?: string
+  c3?: string
+  c4?: string
+  ip_location_label?: string
   path: string
   protocol: string
   status: number
@@ -154,6 +159,7 @@ export interface SummaryStats {
   total_traffic: number // Total bytes sent
   unique_pages: number // Unique pages visited
   avg_traffic_per_pv: number // Average traffic per page view
+  traffic_approximate: boolean // Traffic was extrapolated because the match set exceeded the scan budget
 }
 
 export interface AdvancedSearchResponse {
@@ -247,10 +253,13 @@ export interface DeviceStats {
 export interface DashboardSummary {
   total_uv: number
   total_pv: number
+  total_traffic: number // Total bytes sent over the queried range
   avg_daily_uv: number
   avg_daily_pv: number
   peak_hour: number
   peak_hour_traffic: number
+  avg_qps: number // Requests per second across the queried range
+  peak_qps: number // Busiest minute of the range, expressed per second
 }
 
 export interface DashboardAnalytics {
@@ -294,6 +303,10 @@ export interface ChinaMapData {
   value: number
   percent: number
   cities?: CityData[]
+}
+
+export interface ChinaCityMapRequest extends AnalyticsRequest {
+  province: string
 }
 
 export interface GeoStats {
@@ -346,6 +359,10 @@ const nginx_log = extendCurdApi(useCurdApi('/nginx_logs'), {
     return http.post('/nginx_log/geo/china', data)
   },
 
+  getChinaCityMapData(data: ChinaCityMapRequest): Promise<{ data: CityData[], top_data?: CityData[], custom_mmdb_mode?: boolean }> {
+    return http.post('/nginx_log/geo/china/city', data)
+  },
+
   getGeoStats(data: AnalyticsRequest): Promise<{ stats: GeoStats[] }> {
     return http.post('/nginx_log/geo/stats', data)
   },
@@ -361,6 +378,12 @@ const nginx_log = extendCurdApi(useCurdApi('/nginx_logs'), {
 
   getAdvancedIndexingStatus(): Promise<{ enabled: boolean }> {
     return http.get('/nginx_log/settings/advanced_indexing/status')
+  },
+
+  // Directory nginx writes its default access log to, used to propose a
+  // per-site access_log path that is already inside the log whitelist
+  getDefaultLogDir(): Promise<{ access_log_dir: string }> {
+    return http.get('/nginx_log/default_log_dir')
   },
 })
 

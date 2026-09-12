@@ -1,17 +1,14 @@
 <script setup lang="tsx">
-import type { TwoFAStatus } from '@/api/2fa'
 import type { RecoveryCode } from '@/api/recovery'
-import twoFA from '@/api/2fa'
 import { use2FAModal } from '@/components/TwoFA'
 import { useUserStore } from '@/pinia'
 import { Passkey, RecoveryCodes, TOTP } from '@/views/preference/components/AuthSettings'
 
-const twoFAStatus = ref<TwoFAStatus>({} as TwoFAStatus)
 const recoveryCodes = ref<RecoveryCode[]>()
 const { message } = useGlobalApp()
 
 const userStore = useUserStore()
-const { info } = storeToRefs(userStore)
+const { info, twoFAStatus } = storeToRefs(userStore)
 
 // Form data
 const userForm = ref({
@@ -28,9 +25,7 @@ const loading = ref(false)
 const passwordLoading = ref(false)
 
 function get2FAStatus() {
-  twoFA.status().then(r => {
-    twoFAStatus.value = r
-  })
+  return userStore.refreshTwoFAStatus()
 }
 
 async function getCurrentUser() {
@@ -107,8 +102,8 @@ async function changePassword() {
 
 // Initialize data on mount
 onMounted(() => {
-  getCurrentUser()
-  get2FAStatus()
+  void getCurrentUser()
+  void get2FAStatus()
 })
 </script>
 
@@ -147,7 +142,10 @@ onMounted(() => {
 
       <!-- 2FA Settings Section -->
       <div class="mb-8">
-        <h2 class="text-xl font-semibold mb-4">
+        <h2
+          id="two-factor-authentication"
+          class="mb-4 text-xl font-semibold"
+        >
           {{ $gettext('2FA Settings') }}
         </h2>
         <ACard>

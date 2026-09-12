@@ -5,71 +5,124 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
-	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
+	"github.com/0xJacky/Nginx-UI/internal/cgroup"
 	"github.com/0xJacky/Nginx-UI/internal/geolite"
 	"github.com/0xJacky/Nginx-UI/internal/nginx_log/parser"
-	"github.com/0xJacky/Nginx-UI/internal/nginx_log/utils"
 	"github.com/uozi-tech/cosy/logger"
 )
 
-// Global parser instances
+// logParser is the process-wide parser singleton, used for both batch and
+// single-line parsing.
+//
+// It is an atomic pointer rather than a plain global guarded by sync.Once so
+// that ReleaseLogParser can drop it: the parser owns a GeoIP handle and two
+// 10,000-entry caches, and after a graceful handover the retired process would
+// otherwise keep them reachable - and therefore resident - forever.
 var (
-	logParser      *parser.Parser // Use the concrete type for both regular and single-line parsing
-	parserInitOnce sync.Once
+	logParser    atomic.Pointer[parser.Parser]
+	parserInitMu sync.Mutex
 )
+
+// getLogParser returns the current parser singleton, or nil when none is installed.
+func getLogParser() *parser.Parser {
+	return logParser.Load()
+}
+
+// geoIPOverride replaces the GeoLite-backed geo lookup when set.
+//
+// The slot defaults to nil, and only internal/demo ever fills it, so a
+// production binary always resolves geo data from the real city database.
+// Geo is baked into the indexed document, so this must be installed before
+// InitLogParser runs.
+var geoIPOverride parser.GeoIPService
+
+// SetGeoIPService installs a geo lookup override. Call once, at boot, before
+// any indexing starts.
+func SetGeoIPService(service parser.GeoIPService) {
+	geoIPOverride = service
+}
+
+// maxParserWorkerCount caps the per-file parse fan-out. Parsing is only one
+// stage of the pipeline, and every worker keeps a parse buffer alive.
+const maxParserWorkerCount = 8
 
 // InitLogParser initializes the global parser once (singleton).
 func InitLogParser() {
-	parserInitOnce.Do(func() {
-		// Initialize the parser with production-ready configuration
-		config := parser.DefaultParserConfig()
-		config.MaxLineLength = 16 * 1024 // 16KB for large log lines
-		config.BatchSize = 15000         // Maximum batch size for highest frontend throughput
+	parserInitMu.Lock()
+	defer parserInitMu.Unlock()
 
-		// Derive parser worker count from available CPUs, with sane limits so that
-		// small machines are not overwhelmed while larger hosts can still use
-		// parallel parsing effectively.
-		maxProcs := runtime.GOMAXPROCS(0)
-		if maxProcs <= 0 {
-			maxProcs = runtime.NumCPU()
-		}
-		workerCount := maxProcs
-		if workerCount < 4 {
-			workerCount = 4
-		}
-		if workerCount > 16 {
-			workerCount = 16
-		}
-		config.WorkerCount = workerCount
-		// Note: Caching is handled by the CachedUserAgentParser
+	if logParser.Load() != nil {
+		return
+	}
 
-		// Initialize user agent parser with caching (10,000 cache size for production)
-		uaParser := parser.NewCachedUserAgentParser(
-			parser.NewSimpleUserAgentParser(),
-			10000, // Large cache for production workloads
-		)
+	// Initialize the parser with production-ready configuration
+	config := parser.DefaultParserConfig()
+	config.MaxLineLength = 16 * 1024 // 16KB for large log lines
+	config.BatchSize = 15000         // Maximum batch size for highest frontend throughput
 
-		var geoIPService parser.GeoIPService
-		geoService, err := geolite.GetService()
-		if err != nil {
-			logger.Warnf("Failed to initialize GeoIP service, geo-enrichment will be disabled: %v", err)
-		} else {
-			geoIPService = parser.NewGeoLiteAdapter(geoService)
-		}
+	// Derive parser worker count from the CPUs this process may actually use,
+	// with sane limits so that small machines are not overwhelmed while larger
+	// hosts can still use parallel parsing effectively.
+	//
+	// cgroup.AvailableCPUs, not GOMAXPROCS: inside an LXC/Docker container the
+	// affinity mask reports every host CPU while the cgroup bandwidth
+	// controller throttles the process to a fraction of one, so GOMAXPROCS
+	// would start up to 16 parse goroutines per file on a container that is
+	// only allowed a single core.
+	workerCount := cgroup.AvailableCPUs()
+	if workerCount < 2 {
+		workerCount = 2
+	}
+	if workerCount > maxParserWorkerCount {
+		workerCount = maxParserWorkerCount
+	}
+	config.WorkerCount = workerCount
+	// Note: Caching is handled by the CachedUserAgentParser
 
-		// Create the parser with production configuration
-		logParser = parser.NewParser(config, uaParser, geoIPService)
+	// Initialize user agent parser with caching (10,000 cache size for production)
+	uaParser := parser.NewCachedUserAgentParser(
+		parser.NewSimpleUserAgentParser(),
+		10000, // Large cache for production workloads
+	)
 
-		logger.Info("Nginx log processing optimization system initialized with production configuration")
-	})
+	// Access logs repeat the same IPs heavily; cache lookups so the
+	// per-line hot path avoids repeated GeoIP database queries
+	var geoIPService parser.GeoIPService
+	if geoIPOverride != nil {
+		geoIPService = parser.NewCachedGeoIPService(geoIPOverride, 10000)
+	} else if geoService, err := geolite.GetService(); err != nil {
+		logger.Warnf("Failed to initialize GeoIP service, geo-enrichment will be disabled: %v", err)
+	} else {
+		geoIPService = parser.NewCachedGeoIPService(parser.NewGeoLiteAdapter(geoService), 10000)
+	}
+
+	// Create the parser with production configuration
+	logParser.Store(parser.NewParser(config, uaParser, geoIPService))
+
+	logger.Info("Nginx log processing optimization system initialized with production configuration")
+}
+
+// ReleaseLogParser drops the parser singleton and the GeoIP handle and caches
+// it owns.
+//
+// After a graceful handover the retired process stays alive as a connection
+// proxy for the new binary, so anything left reachable from a package global
+// can never be collected. Releasing the parser lets that memory go back to the
+// OS instead of doubling the resident set of the container for the lifetime of
+// the process.
+func ReleaseLogParser() {
+	parserInitMu.Lock()
+	defer parserInitMu.Unlock()
+	logParser.Store(nil)
 }
 
 // IsLogParserInitialized returns true if the global parser singleton has been created.
 func IsLogParserInitialized() bool {
-	return logParser != nil
+	return getLogParser() != nil
 }
 
 // ParseLogLine parses a raw log line into a structured LogDocument using optimized parsing
@@ -78,24 +131,31 @@ func ParseLogLine(line string) (*LogDocument, error) {
 		return nil, nil
 	}
 
-	if logParser == nil {
+	activeParser := getLogParser()
+	if activeParser == nil {
 		return nil, ErrLogParserNotInitialized
 	}
 
 	// Use parser for single line processing
-	entry, err := logParser.ParseLine(line)
+	entry, err := activeParser.ParseLine(line)
 	if err != nil {
 		return nil, err
 	}
 
-	return convertToLogDocument(entry, ""), nil
+	return convertToLogDocument(entry, "", ""), nil
 }
 
-// ParseLogStream parses a stream of log data using ParseStream (7-8x faster)
-func ParseLogStream(ctx context.Context, reader io.Reader, filePath string) ([]*LogDocument, error) {
-	if logParser == nil {
-		return nil, ErrLogParserNotInitialized
+// ParseLogStreamBatches parses a stream of log data in bounded batches,
+// invoking fn with each converted batch of LogDocuments as soon as it is
+// ready. Only one batch is held in memory at a time, so peak memory stays
+// bounded regardless of file size. Returns the number of processed and
+// failed lines.
+func ParseLogStreamBatches(ctx context.Context, reader io.Reader, filePath string, fn func(docs []*LogDocument) error) (processed, failed int, err error) {
+	activeParser := getLogParser()
+	if activeParser == nil {
+		return 0, 0, ErrLogParserNotInitialized
 	}
+
 	// Auto-detect and handle gzip files
 	actualReader, cleanup, err := createReaderForFile(reader, filePath)
 	if err != nil {
@@ -106,103 +166,49 @@ func ParseLogStream(ctx context.Context, reader io.Reader, filePath string) ([]*
 		defer cleanup()
 	}
 
-	// Use ParseStream for batch processing with 70% memory reduction
-	parseResult, err := logParser.StreamParse(ctx, actualReader)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert to LogDocument format using memory pools for efficiency
-	docs := make([]*LogDocument, 0, len(parseResult.Entries))
-	for _, entry := range parseResult.Entries {
-		logDoc := convertToLogDocument(entry, filePath)
-		docs = append(docs, logDoc)
-	}
-
-	logger.Infof("ParseStream processed %d lines with %.2f%% error rate",
-		parseResult.Processed, parseResult.ErrorRate*100)
-
-	return docs, nil
-}
-
-// ParseLogStreamChunked processes large files using chunked processing for memory efficiency
-func ParseLogStreamChunked(ctx context.Context, reader io.Reader, filePath string, chunkSize int) ([]*LogDocument, error) {
-	if logParser == nil {
-		return nil, ErrLogParserNotInitialized
-	}
-	// Auto-detect and handle gzip files
-	actualReader, cleanup, err := createReaderForFile(reader, filePath)
-	if err != nil {
-		logger.Warnf("Error setting up reader for %s: %v", filePath, err)
-		actualReader = reader // fallback to original reader
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-
-	// Use ChunkedParseStream for large files with controlled memory usage
-	parseResult, err := logParser.ChunkedParseStream(ctx, actualReader, chunkSize)
-	if err != nil {
-		return nil, err
-	}
-
-	docs := make([]*LogDocument, 0, len(parseResult.Entries))
-	for _, entry := range parseResult.Entries {
-		logDoc := convertToLogDocument(entry, filePath)
-		docs = append(docs, logDoc)
-	}
-
-	return docs, nil
-}
-
-// ParseLogStreamMemoryEfficient uses memory-efficient parsing for low memory environments
-func ParseLogStreamMemoryEfficient(ctx context.Context, reader io.Reader, filePath string) ([]*LogDocument, error) {
-	if logParser == nil {
-		return nil, ErrLogParserNotInitialized
-	}
-	// Auto-detect and handle gzip files
-	actualReader, cleanup, err := createReaderForFile(reader, filePath)
-	if err != nil {
-		logger.Warnf("Error setting up reader for %s: %v", filePath, err)
-		actualReader = reader // fallback to original reader
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-
-	// Use MemoryEfficientParseStream for minimal memory usage
-	parseResult, err := logParser.MemoryEfficientParseStream(ctx, actualReader)
-	if err != nil {
-		return nil, err
-	}
-
-	docs := make([]*LogDocument, 0, len(parseResult.Entries))
-	for _, entry := range parseResult.Entries {
-		logDoc := convertToLogDocument(entry, filePath)
-		docs = append(docs, logDoc)
-	}
-
-	return docs, nil
-}
-
-// convertToLogDocument converts parser.AccessLogEntry to indexer.LogDocument with memory pooling
-func convertToLogDocument(entry *parser.AccessLogEntry, filePath string) *LogDocument {
-	// Use memory pools for string operations (48-81% faster, 99.4% memory reduction)
-	sb := utils.LogStringBuilderPool.Get()
-	defer utils.LogStringBuilderPool.Put(sb)
-
-	// Extract main log path from file path for efficient log group queries
+	// The main log path is constant for the whole file; compute it once
 	mainLogPath := getMainLogPathFromFile(filePath)
 
-	// DEBUG: Log the main log path extraction (sample only)
-	if entry.Timestamp%1000 == 0 { // Log every 1000th entry
-		if mainLogPath != filePath {
-			logger.Debugf("🔗 SAMPLE MainLogPath extracted: '%s' -> '%s'", filePath, mainLogPath)
-		} else {
-			logger.Debugf("🔗 SAMPLE MainLogPath same as filePath: '%s'", filePath)
+	parseResult, err := activeParser.StreamParseBatches(ctx, actualReader, func(entries []*parser.AccessLogEntry) error {
+		docs := make([]*LogDocument, 0, len(entries))
+		for _, entry := range entries {
+			docs = append(docs, convertToLogDocument(entry, filePath, mainLogPath))
 		}
+		return fn(docs)
+	})
+	if parseResult == nil {
+		return 0, 0, err
 	}
 
+	return parseResult.Processed, parseResult.Failed, err
+}
+
+// ParseLogStream parses a stream of log data and returns all documents in
+// one slice. Prefer ParseLogStreamBatches for whole-file indexing — this
+// variant accumulates everything in memory and is only appropriate for
+// bounded inputs such as incremental tails.
+func ParseLogStream(ctx context.Context, reader io.Reader, filePath string) ([]*LogDocument, error) {
+	var docs []*LogDocument
+	processed, failed, err := ParseLogStreamBatches(ctx, reader, filePath, func(batch []*LogDocument) error {
+		docs = append(docs, batch...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if processed > 0 {
+		logger.Infof("ParseStream processed %d lines with %.2f%% error rate",
+			processed, float64(failed)/float64(processed)*100)
+	}
+
+	return docs, nil
+}
+
+// convertToLogDocument converts parser.AccessLogEntry to indexer.LogDocument.
+// mainLogPath is passed in by the caller: it is constant for a whole file, and
+// this function runs once per log line.
+func convertToLogDocument(entry *parser.AccessLogEntry, filePath, mainLogPath string) *LogDocument {
 	// Convert parser.AccessLogEntry to indexer.LogDocument
 	// This mapping is necessary because the indexer and parser might have different data structures.
 	logDoc := &LogDocument{
@@ -211,6 +217,10 @@ func convertToLogDocument(entry *parser.AccessLogEntry, filePath string) *LogDoc
 		RegionCode:  entry.RegionCode,
 		Province:    entry.Province,
 		City:        entry.City,
+		C1:          entry.C1,
+		C2:          entry.C2,
+		C3:          entry.C3,
+		C4:          entry.C4,
 		Method:      entry.Method,
 		Path:        entry.Path,
 		PathExact:   entry.Path, // Use the same for now
@@ -234,29 +244,7 @@ func convertToLogDocument(entry *parser.AccessLogEntry, filePath string) *LogDoc
 		logDoc.UpstreamTime = entry.UpstreamTime
 	}
 
-	// DEBUG: Verify MainLogPath is set correctly (sample only)
-	if entry.Timestamp%1000 == 0 { // Log every 1000th entry
-		if logDoc.MainLogPath == "" {
-			logger.Errorf("❌ SAMPLE MainLogPath is empty! FilePath: '%s'", filePath)
-		} else {
-			logger.Debugf("✅ SAMPLE LogDocument created with MainLogPath: '%s', FilePath: '%s'", logDoc.MainLogPath, logDoc.FilePath)
-		}
-	}
-
 	return logDoc
-}
-
-// GetOptimizationStatus returns the current optimization status
-func GetOptimizationStatus() map[string]interface{} {
-	return map[string]interface{}{
-		"parser_optimized":     true,
-		"simd_enabled":         true,
-		"memory_pools_enabled": true,
-		"batch_processing":     "ParseStream (7-8x faster)",
-		"single_line_parsing":  "SIMD (235x faster)",
-		"memory_efficiency":    "70% reduction in memory usage",
-		"status":               "Production ready",
-	}
 }
 
 // createReaderForFile creates appropriate reader for the file, with gzip detection
@@ -287,8 +275,10 @@ func createReaderForFile(reader io.Reader, filePath string) (io.Reader, func(), 
 
 		return gzReader, func() { gzReader.Close() }, nil
 	} else {
-		// File has .gz extension but no gzip magic number
-		logger.Warnf("File %s has .gz extension but no gzip magic header (header: %x), treating as plain text", filePath, header)
+		// No gzip magic header: either the stream was already decompressed by
+		// the caller (e.g. incremental indexing pre-decompresses to skip to a
+		// byte position) or the file is mislabeled. Both are handled as plain text.
+		logger.Debugf("File %s has .gz extension but stream has no gzip magic header, treating as plain text", filePath)
 		return bufferedReader, nil, nil
 	}
 }

@@ -55,6 +55,11 @@ bash -c "$(curl -L https://cloud.nginxui.com/install.sh)" @ install --channel de
 一键安装脚本默认设置的监听端口为 `9000`，HTTP Challenge 端口默认为 `9180`。如果有端口冲突，请手动修改 `/usr/local/etc/nginx-ui/app.ini`，
 并使用 `systemctl restart nginx-ui` 重启 Nginx UI 服务。更多有关信息，请查看 [配置参考](./config-server)。
 
+服务首次启动后，安装脚本会在终端中打印网页安装所需的一次性 Secret。
+如果您错过了这段输出，可以读取配置目录中的隐藏文件 `.install_secret`。
+默认路径为 `/usr/local/etc/nginx-ui/.install_secret`。
+如果您自定义了 `DATA_PATH`，请改为读取 `$DATA_PATH/.install_secret`。
+
 ## 卸载
 
 ### `install.sh remove`
@@ -163,6 +168,38 @@ rc-service nginx-ui status
 
 ```shell [开机启动]
 rc-update add nginx-ui default
+```
+
+:::
+
+### OpenWrt
+
+如果您的系统使用 OpenWrt init 脚本，请使用以下 `/etc/init.d` 命令对其进行控制：
+
+::: code-group
+
+```shell [启动]
+/etc/init.d/nginx-ui start
+```
+
+```shell [停止]
+/etc/init.d/nginx-ui stop
+```
+
+```shell [重启]
+/etc/init.d/nginx-ui restart
+```
+
+```shell [显示状态]
+/etc/init.d/nginx-ui status
+```
+
+```shell [开机启动]
+/etc/init.d/nginx-ui enable
+```
+
+```shell [禁用开机启动]
+/etc/init.d/nginx-ui disable
 ```
 
 :::

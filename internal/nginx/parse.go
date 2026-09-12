@@ -13,6 +13,8 @@ const (
 	Server   = "server"
 	Location = "location"
 	Upstream = "upstream"
+	Http     = "http"
+	Stream   = "stream"
 )
 
 func (s *NgxServer) ParseServer(directive config.IDirective) {
@@ -166,8 +168,37 @@ func (c *NgxConfig) parseCustom(directive config.IDirective) {
 	c.Custom += "}\n"
 }
 
+// buildComment drops the leading marker only. buildComments re-adds one when
+// the config is written back, so a # inside the body has to survive.
 func buildComment(c []string) string {
-	return strings.ReplaceAll(strings.Join(c, "\n"), "#", "")
+	lines := make([]string, 0, len(c))
+	for _, line := range c {
+		lines = append(lines, strings.TrimLeft(line, "#"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func shouldUnwrapRootBlock(block config.IBlock) config.IDirective {
+	if block == nil {
+		return nil
+	}
+
+	directives := block.GetDirectives()
+	if len(directives) != 1 {
+		return nil
+	}
+
+	directive := directives[0]
+	if directive.GetBlock() == nil {
+		return nil
+	}
+
+	switch directive.GetName() {
+	case Http, Stream:
+		return directive
+	default:
+		return nil
+	}
 }
 
 func parse(block config.IBlock, ngxConfig *NgxConfig) (err error) {
@@ -175,6 +206,12 @@ func parse(block config.IBlock, ngxConfig *NgxConfig) (err error) {
 		err = ErrBlockIsNil
 		return
 	}
+
+	if rootBlock := shouldUnwrapRootBlock(block); rootBlock != nil {
+		ngxConfig.RootBlock = rootBlock.GetName()
+		return parse(rootBlock.GetBlock(), ngxConfig)
+	}
+
 	for _, v := range block.GetDirectives() {
 		comments := buildComment(v.GetComment())
 		switch v.GetName() {
@@ -229,10 +266,11 @@ func ParseNgxConfigByContent(content string) (ngxConfig *NgxConfig, err error) {
 }
 
 func ParseNgxConfig(filename string) (ngxConfig *NgxConfig, err error) {
-	p, err := parser.NewParser(filename, parser.WithSkipValidDirectivesErr())
+	content, err := ReadFile(filename)
 	if err != nil {
 		return nil, errors.Wrap(err, "error ParseNgxConfig")
 	}
+	p := parser.NewStringParser(string(content), parser.WithSkipValidDirectivesErr())
 	c, err := p.Parse()
 	if err != nil {
 		return

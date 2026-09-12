@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { SiteInfo } from '@/api/site_navigation'
-import { GlobalOutlined } from '@ant-design/icons-vue'
+import { GlobalOutlined } from '@antdv-next/icons'
 import VueDraggable from 'vuedraggable'
 import { siteNavigationApi } from '@/api/site_navigation'
 import { useWebSocket } from '@/lib/websocket'
@@ -16,6 +16,7 @@ const settingsMode = ref(false)
 const draggableSites = ref<SiteInfo[]>([])
 const configModalVisible = ref(false)
 const configTarget = ref<SiteInfo>()
+const healthCheckEnabled = ref(true)
 
 watch(sites, newSites => {
   if (!settingsMode.value) {
@@ -31,7 +32,7 @@ function hasCustomOrdering(siteList: SiteInfo[]): boolean {
 }
 
 function sortSitesByName(siteList: SiteInfo[]): SiteInfo[] {
-  return [...siteList].sort((a, b) => {
+  return siteList.toSorted((a, b) => {
     const nameCompare = (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' })
     if (nameCompare !== 0) {
       return nameCompare
@@ -64,8 +65,23 @@ watch(data, newData => {
 async function loadSites() {
   try {
     loading.value = true
-    const response = await siteNavigationApi.getSites()
-    sites.value = normalizeSites(response.data || [])
+    const [response, serviceStatus] = await Promise.all([
+      siteNavigationApi.getSites(),
+      siteNavigationApi.getStatus(),
+    ])
+    const refreshedSites = normalizeSites(response.data || [])
+    sites.value = refreshedSites
+    if (settingsMode.value) {
+      const refreshedById = new Map(refreshedSites.map(site => [site.id, site]))
+      const existingIds = new Set(draggableSites.value.map(site => site.id))
+      draggableSites.value = [
+        ...draggableSites.value
+          .map(site => refreshedById.get(site.id))
+          .filter((site): site is SiteInfo => Boolean(site)),
+        ...refreshedSites.filter(site => !existingIds.has(site.id)),
+      ]
+    }
+    healthCheckEnabled.value = serviceStatus.enabled
   }
   catch (error) {
     console.error('Failed to load sites:', error)
@@ -121,19 +137,6 @@ function openConfigModal(site: SiteInfo) {
   configModalVisible.value = true
 }
 
-async function handleConfigSave(config: import('@/api/site_navigation').HealthCheckConfig) {
-  try {
-    if (configTarget.value) {
-      await siteNavigationApi.updateHealthCheck(configTarget.value.id, config)
-      message.success($gettext('Health check configuration saved'))
-    }
-  }
-  catch (error) {
-    console.error('Failed to save health check config:', error)
-    message.error($gettext('Failed to save configuration'))
-  }
-}
-
 const mounted = ref(false)
 
 onMounted(async () => {
@@ -151,6 +154,7 @@ onUnmounted(() => {
     <Teleport v-if="mounted" to=".action">
       <SiteNavigationToolbar
         :is-connected="isConnected"
+        :health-check-enabled="healthCheckEnabled"
         :refreshing="refreshing"
         :settings-mode="settingsMode"
         @refresh="handleRefresh"
@@ -170,7 +174,7 @@ onUnmounted(() => {
         {{ $gettext('No sites found') }}
       </h3>
       <p class="text-gray-600 dark:text-gray-400 text-center max-w-md">
-        {{ $gettext('Sites will appear here once you configure nginx server blocks with valid server_name directives.') }}
+        {{ $gettext('Sites will appear here once you configure nginx server blocks with valid server_name (localhost excluded) directives.') }}
       </p>
     </div>
 
@@ -197,8 +201,7 @@ onUnmounted(() => {
     <SiteHealthCheckModal
       v-model:open="configModalVisible"
       :site="configTarget"
-      @save="handleConfigSave"
-      @refresh="handleRefresh"
+      @refresh="loadSites"
     />
   </div>
 </template>

@@ -3,6 +3,9 @@ package cron
 import (
 	"context"
 
+	"github.com/0xJacky/Nginx-UI/internal/cert"
+	"github.com/0xJacky/Nginx-UI/internal/nodeauth"
+	"github.com/0xJacky/Nginx-UI/settings"
 	"github.com/go-co-op/gocron/v2"
 	"github.com/uozi-tech/cosy/logger"
 )
@@ -20,6 +23,12 @@ func init() {
 
 // InitCronJobs initializes and starts all cron jobs
 func InitCronJobs(ctx context.Context) {
+	// Sweep any cert rows still marked "pending" — they belong to an
+	// issuance that was killed by the previous shutdown.
+	if err := cert.SweepStalePending(); err != nil {
+		logger.Errorf("SweepStalePending Err: %v\n", err)
+	}
+
 	// Initialize auto cert job
 	_, err := setupAutoCertJob(s)
 	if err != nil {
@@ -32,6 +41,12 @@ func InitCronJobs(ctx context.Context) {
 		logger.Fatalf("CertExpired Err: %v\n", err)
 	}
 
+	// Initialize self-signed certificate renewal job
+	_, err = setupSelfSignedCertRenewalJob(s)
+	if err != nil {
+		logger.Fatalf("SelfSignedCertRenewal Err: %v\n", err)
+	}
+
 	// Start logrotate job
 	setupLogrotateJob(s)
 
@@ -39,6 +54,13 @@ func InitCronJobs(ctx context.Context) {
 	_, err = setupAuthTokenCleanupJob(s)
 	if err != nil {
 		logger.Fatalf("CleanExpiredAuthToken Err: %v\n", err)
+	}
+
+	// Initialize automatic node credential upgrade and rotation.
+	nodeauth.StartRelationshipUpgradeWorker(ctx, settings.NodeSettings.InstanceID)
+	_, err = setupNodeCredentialMaintenanceJob(s)
+	if err != nil {
+		logger.Fatalf("NodeCredentialMaintenance Err: %v\n", err)
 	}
 
 	// Initialize auto backup jobs
@@ -62,6 +84,12 @@ func InitCronJobs(ctx context.Context) {
 	_, err = setupIncrementalIndexingJob(s)
 	if err != nil {
 		logger.Fatalf("IncrementalIndexing Err: %v\n", err)
+	}
+
+	// Initialize automatic namespace replication job
+	_, err = setupNamespaceSyncJob(s)
+	if err != nil {
+		logger.Fatalf("NamespaceAutoSync Err: %v\n", err)
 	}
 
 	// Start the scheduler

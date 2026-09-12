@@ -1,8 +1,9 @@
 .DS_Store
 database.db
+database.db-*
 tmp
 node_modules
-.pnpm-store
+.bun
 app.ini
 app.*.ini
 dist
@@ -19,6 +20,7 @@ internal/**/*.gen.go
 .devcontainer/go-path
 .devcontainer/data
 .devcontainer/casdoor.pem
+.devcontainer/devcontainer-lock.json
 .vscode/.i18n-gettext.secret
 .go/
 /.cunzhi-memory
@@ -26,3 +28,15 @@ log-index/
 *.prof
 *.test
 GeoLite2-City.mmdb
+GeoLite2-City.mmdb.xz
+enterprise.mmdb
+nginx/
+*.log
+.claude/settings.local.json
+
+# Cloudflare Workers local state (miniflare cache, durable object storage)
+cloudflare/.wrangler/
+
+# Cross-compiled binary that cloudflare/build-binary.sh drops in for demo.Dockerfile
+nginx-ui-linux-*/
+app/.env

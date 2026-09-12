@@ -3,6 +3,7 @@ package user
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"time"
 
 	"github.com/0xJacky/Nginx-UI/model"
@@ -14,7 +15,6 @@ import (
 )
 
 const ExpiredTime = 24 * time.Hour
-
 
 type JWTClaims struct {
 	Name   string `json:"name"`
@@ -33,12 +33,81 @@ func GetUser(name string) (user *model.User, err error) {
 }
 
 func DeleteToken(token string) {
+	if token == "" {
+		return
+	}
+
 	// Remove from cache first
 	InvalidateTokenCache(token)
-	
+
 	// Remove from database
 	q := query.AuthToken
 	_, _ = q.Where(q.Token.Eq(token)).Delete()
+}
+
+func DeleteShortToken(shortToken string) {
+	if shortToken == "" {
+		return
+	}
+
+	InvalidateShortTokenCache(shortToken)
+
+	db := model.UseDB()
+	if db == nil {
+		return
+	}
+
+	if err := db.Where("short_token = ?", shortToken).Delete(&model.AuthToken{}).Error; err != nil {
+		logger.Error(err)
+	}
+}
+
+func DeleteUserTokens(userID uint64) {
+	if userID == 0 {
+		return
+	}
+
+	InvalidateUserCache(userID)
+
+	db := model.UseDB()
+	if db == nil {
+		return
+	}
+
+	var authTokens []model.AuthToken
+	if err := db.Where("user_id = ?", userID).Find(&authTokens).Error; err != nil {
+		logger.Error(err)
+		return
+	}
+
+	for _, authToken := range authTokens {
+		if authToken.Token != "" {
+			InvalidateTokenCache(authToken.Token)
+		}
+		if authToken.ShortToken != "" {
+			InvalidateShortTokenCache(authToken.ShortToken)
+		}
+	}
+
+	if err := db.Where("user_id = ?", userID).Delete(&model.AuthToken{}).Error; err != nil {
+		logger.Error(err)
+	}
+}
+
+func getActiveUserByID(userID uint64) (*model.User, bool) {
+	u := query.User
+	user, err := u.FirstByID(userID)
+	if err != nil {
+		return nil, false
+	}
+
+	if !user.Status {
+		DeleteUserTokens(user.ID)
+		return nil, false
+	}
+
+	CacheUser(user)
+	return user, true
 }
 
 func GetTokenUser(token string) (*model.User, bool) {
@@ -50,19 +119,7 @@ func GetTokenUser(token string) (*model.User, bool) {
 
 	// Try to get from cache first
 	if tokenData, found := GetCachedTokenData(token); found {
-		// Get user from cache or database
-		if user, userFound := GetCachedUser(tokenData.UserID); userFound {
-			return user, true
-		}
-		
-		// User not in cache, load from database and cache it
-		u := query.User
-		user, err := u.FirstByID(tokenData.UserID)
-		if err == nil {
-			CacheUser(user)
-			return user, true
-		}
-		return nil, false
+		return getActiveUserByID(tokenData.UserID)
 	}
 
 	// Not in cache, load from database
@@ -80,14 +137,7 @@ func GetTokenUser(token string) (*model.User, bool) {
 	// Cache the token data
 	CacheToken(authToken)
 
-	// Get user and cache it
-	u := query.User
-	user, err := u.FirstByID(authToken.UserID)
-	if err == nil {
-		CacheUser(user)
-		return user, true
-	}
-	return user, err == nil
+	return getActiveUserByID(authToken.UserID)
 }
 
 func GetTokenUserByShortToken(shortToken string) (*model.User, bool) {
@@ -97,19 +147,7 @@ func GetTokenUserByShortToken(shortToken string) (*model.User, bool) {
 
 	// Try to get from cache first
 	if tokenData, found := GetCachedShortTokenData(shortToken); found {
-		// Get user from cache or database
-		if user, userFound := GetCachedUser(tokenData.UserID); userFound {
-			return user, true
-		}
-		
-		// User not in cache, load from database and cache it
-		u := query.User
-		user, err := u.FirstByID(tokenData.UserID)
-		if err == nil {
-			CacheUser(user)
-			return user, true
-		}
-		return nil, false
+		return getActiveUserByID(tokenData.UserID)
 	}
 
 	// Not in cache, load from database
@@ -121,21 +159,18 @@ func GetTokenUserByShortToken(shortToken string) (*model.User, bool) {
 	}
 
 	if authToken.ExpiredAt < time.Now().Unix() {
-		DeleteToken(authToken.Token)
+		if authToken.Token != "" {
+			DeleteToken(authToken.Token)
+		} else {
+			DeleteShortToken(authToken.ShortToken)
+		}
 		return nil, false
 	}
 
 	// Cache the token data
 	CacheToken(&authToken)
 
-	// Get user and cache it
-	u := query.User
-	user, err := u.FirstByID(authToken.UserID)
-	if err == nil {
-		CacheUser(user)
-		return user, true
-	}
-	return user, err == nil
+	return getActiveUserByID(authToken.UserID)
 }
 
 type AccessTokenPayload struct {
@@ -143,7 +178,36 @@ type AccessTokenPayload struct {
 	ShortToken string `json:"short_token,omitempty"`
 }
 
+type LoginProof string
+
+const (
+	LoginProofPassword LoginProof = "password"
+	LoginProofOTP      LoginProof = "otp"
+	LoginProofPasskey  LoginProof = "passkey"
+	LoginProofExternal LoginProof = "external"
+	LoginProofSystem   LoginProof = "system"
+)
+
+var ErrPasskeyRequired = errors.New("passkey verification is required")
+
+// IssueLoginToken is the policy gate for every interactive login path.
+func IssueLoginToken(user *model.User, proof LoginProof) (*AccessTokenPayload, error) {
+	if user == nil {
+		return nil, errors.New("user is required")
+	}
+	if proof == LoginProofPassword && !user.EnabledOTP() && user.EnabledPasskey() {
+		return nil, ErrPasskeyRequired
+	}
+	return generateJWT(user)
+}
+
+// GenerateJWT remains available for non-login system flows and tests. New
+// interactive login paths must call IssueLoginToken with an explicit proof.
 func GenerateJWT(user *model.User) (*AccessTokenPayload, error) {
+	return IssueLoginToken(user, LoginProofSystem)
+}
+
+func generateJWT(user *model.User) (*AccessTokenPayload, error) {
 	now := time.Now()
 	claims := JWTClaims{
 		Name:   user.Name,
@@ -191,9 +255,35 @@ func GenerateJWT(user *model.User) (*AccessTokenPayload, error) {
 	CacheToken(authToken)
 
 	return &AccessTokenPayload{
-		Token:      signedToken,
-		ShortToken: shortToken,
+		Token: signedToken,
 	}, nil
+}
+
+// GenerateShortToken creates a standalone short token for WebSocket authentication.
+// The short token is stored in a new AuthToken row with no associated JWT.
+func GenerateShortToken(userID uint64) (string, error) {
+	shortTokenBytes := make([]byte, 16)
+	_, err := rand.Read(shortTokenBytes)
+	if err != nil {
+		return "", err
+	}
+	shortToken := base64.URLEncoding.EncodeToString(shortTokenBytes)[:16]
+
+	now := time.Now()
+	authToken := &model.AuthToken{
+		UserID:     userID,
+		ShortToken: shortToken,
+		ExpiredAt:  now.Add(ExpiredTime).Unix(),
+	}
+
+	q := query.AuthToken
+	err = q.Create(authToken)
+	if err != nil {
+		return "", err
+	}
+
+	CacheToken(authToken)
+	return shortToken, nil
 }
 
 func ValidateJWT(tokenStr string) (claims *JWTClaims, err error) {
@@ -213,4 +303,3 @@ func ValidateJWT(tokenStr string) (claims *JWTClaims, err error) {
 	}
 	return nil, ErrInvalidClaimsType
 }
-

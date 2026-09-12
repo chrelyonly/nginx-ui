@@ -10,20 +10,24 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 
 	"github.com/0xJacky/Nginx-UI/internal/analytic"
 	"github.com/0xJacky/Nginx-UI/internal/cache"
 	"github.com/0xJacky/Nginx-UI/internal/cert"
 	"github.com/0xJacky/Nginx-UI/internal/cluster"
 	"github.com/0xJacky/Nginx-UI/internal/cron"
+	"github.com/0xJacky/Nginx-UI/internal/demo"
 	"github.com/0xJacky/Nginx-UI/internal/docker"
 	"github.com/0xJacky/Nginx-UI/internal/event"
 	"github.com/0xJacky/Nginx-UI/internal/helper"
 	"github.com/0xJacky/Nginx-UI/internal/mcp"
 	"github.com/0xJacky/Nginx-UI/internal/nginx_log"
+	"github.com/0xJacky/Nginx-UI/internal/nodeauth"
 	"github.com/0xJacky/Nginx-UI/internal/passkey"
 	"github.com/0xJacky/Nginx-UI/internal/self_check"
 	"github.com/0xJacky/Nginx-UI/internal/sitecheck"
+	"github.com/0xJacky/Nginx-UI/internal/system"
 	"github.com/0xJacky/Nginx-UI/internal/user"
 	"github.com/0xJacky/Nginx-UI/internal/validation"
 	"github.com/0xJacky/Nginx-UI/model"
@@ -50,9 +54,16 @@ func Boot(ctx context.Context) {
 	}
 
 	async := []func(){
+		// First: a demo node swaps in fabricated providers, and several
+		// consumers below build themselves behind a sync.Once. Installing after
+		// them would silently have no effect.
+		InitDemoOverrides,
 		InitJsExtensionType,
+		InitInstallSecret,
 		InitNodeSecret,
+		InitNodeInstanceID,
 		InitCryptoSecret,
+		analytic.Initialize,
 		validation.Init,
 		self_check.Init,
 		func() {
@@ -84,6 +95,9 @@ func InitAfterDatabase(ctx context.Context) {
 		registerPredefinedUser,
 		cluster.RegisterPredefinedNodes,
 		RegisterAcmeUser,
+		// Before sitecheck.Init, so the site prober sees the seeded rows.
+		demo.Seed,
+		sitecheck.Init,
 	}
 
 	for _, v := range syncs {
@@ -96,7 +110,6 @@ func InitAfterDatabase(ctx context.Context) {
 		analytic.RetrieveNodesStatus,
 		passkey.Init,
 		mcp.Init,
-		sitecheck.Init,
 		nginx_log.InitializeServices,
 		user.InitTokenCache,
 	}
@@ -115,6 +128,17 @@ func recovery() {
 	}
 }
 
+// RecoverWithLocalPanicLog writes a recovered panic to the local logger when
+// the SLS producer is unavailable, then re-panics so Cosy can handle it.
+func RecoverWithLocalPanicLog() {
+	if err := recover(); err != nil {
+		if !logger.HasSLSSupport() {
+			logger.Errorf("Application initialization panic before SLS was ready: %v\n%s", err, debug.Stack())
+		}
+		panic(err)
+	}
+}
+
 func InitDatabase(ctx context.Context) {
 	cModel.ResolvedModels()
 	// Skip install
@@ -125,6 +149,9 @@ func InitDatabase(ctx context.Context) {
 	db := cosy.InitDB(sqlite.Open(path.Dir(cSettings.ConfPath), settings.DatabaseSettings))
 	model.Use(db)
 	query.Init(db)
+	if err := nodeauth.MigrateLegacyNodeCredentials(db); err != nil {
+		logger.Fatal("Migrate legacy node credentials: ", err)
+	}
 
 	InitAfterDatabase(ctx)
 }
@@ -133,13 +160,36 @@ func InitNodeSecret() {
 	if settings.NodeSettings.Secret == "" {
 		logger.Info("Secret is empty, generating...")
 		uuidStr := uuid.New().String()
-		settings.NodeSettings.Secret = uuidStr
-
-		err := settings.Save()
+		err := settings.Update(func() {
+			settings.NodeSettings.Secret = uuidStr
+		})
 		if err != nil {
 			logger.Error("Error save settings", err)
 		}
-		logger.Info("Generated Secret: ", uuidStr)
+		logger.Info("Generated legacy node API secret")
+	}
+}
+
+// InitDemoOverrides swaps real providers for fabricated ones when this node is
+// a public demo. It does nothing at all on a normal installation.
+func InitDemoOverrides() {
+	demo.Install()
+}
+
+func InitNodeInstanceID() {
+	if settings.NodeSettings.InstanceID != "" {
+		return
+	}
+	if err := settings.Update(func() {
+		settings.NodeSettings.InstanceID = uuid.NewString()
+	}); err != nil {
+		logger.Fatal("Generate node instance ID: ", err)
+	}
+}
+
+func InitInstallSecret() {
+	if err := system.EnsureInstallSecret(); err != nil {
+		logger.Error("Error preparing install secret", err)
 	}
 }
 
@@ -153,9 +203,11 @@ func InitCryptoSecret() {
 			return
 		}
 
-		settings.CryptoSettings.Secret = hex.EncodeToString(key)
+		secret := hex.EncodeToString(key)
 
-		err := settings.Save()
+		err := settings.Update(func() {
+			settings.CryptoSettings.Secret = secret
+		})
 		if err != nil {
 			logger.Error("Error save settings", err)
 		}

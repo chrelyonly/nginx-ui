@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0xJacky/Nginx-UI/internal/middleware"
 	"github.com/0xJacky/Nginx-UI/internal/user"
 	"github.com/0xJacky/Nginx-UI/query"
 	"github.com/0xJacky/Nginx-UI/settings"
@@ -24,10 +25,11 @@ type LoginUser struct {
 }
 
 const (
-	ErrMaxAttempts = 4291
-	Enabled2FA     = 199
-	Error2FACode   = 4034
-	LoginSuccess   = 200
+	ErrMaxAttempts  = 4291
+	PasskeyRequired = 198
+	Enabled2FA      = 199
+	Error2FACode    = 4034
+	LoginSuccess    = 200
 )
 
 type LoginResponse struct {
@@ -35,7 +37,10 @@ type LoginResponse struct {
 	Error   string `json:"error,omitempty"`
 	Code    int    `json:"code"`
 	*user.AccessTokenPayload
-	SecureSessionID string `json:"secure_session_id,omitempty"`
+	SecureSessionID  string `json:"secure_session_id,omitempty"`
+	SecureSessionTTL int    `json:"secure_session_ttl,omitempty"`
+	PreAuthID        string `json:"pre_auth_id,omitempty"`
+	Options          any    `json:"options,omitempty"`
 }
 
 func Login(c *gin.Context) {
@@ -75,7 +80,9 @@ func Login(c *gin.Context) {
 
 	// Check if the user enables 2FA
 	var secureSessionID string
+	var secureSessionTTL int
 
+	loginProof := user.LoginProofPassword
 	if u.EnabledOTP() {
 		if json.OTP == "" && json.RecoveryCode == "" {
 			c.JSON(http.StatusOK, LoginResponse{
@@ -86,30 +93,38 @@ func Login(c *gin.Context) {
 			return
 		}
 
-		if err = user.VerifyOTP(u, json.OTP, json.RecoveryCode); err != nil {
+		if _, err = user.VerifyOTP(u, json.OTP, json.RecoveryCode); err != nil {
 			cosy.ErrHandler(c, err)
 			user.BanIP(clientIP)
 			return
 		}
 
 		secureSessionID = user.SetSecureSessionID(u.ID)
+		secureSessionTTL = int(user.SecureSessionDuration().Seconds())
+		loginProof = user.LoginProofOTP
+	} else if u.EnabledPasskey() {
+		beginPasskeyPreAuthentication(c, u)
+		return
 	}
 
 	// login success, clear banned record
 	_, _ = b.Where(b.IP.Eq(clientIP)).Delete()
 
 	logger.Info("[User Login]", u.Name)
-	accessToken, err := user.GenerateJWT(u)
+	accessToken, err := user.IssueLoginToken(u, loginProof)
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return
 	}
+
+	middleware.EnsureSecureSessionCookie(c)
 
 	c.JSON(http.StatusOK, LoginResponse{
 		Code:               LoginSuccess,
 		Message:            "ok",
 		AccessTokenPayload: accessToken,
 		SecureSessionID:    secureSessionID,
+		SecureSessionTTL:   secureSessionTTL,
 	})
 }
 

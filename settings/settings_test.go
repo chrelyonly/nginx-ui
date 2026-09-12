@@ -25,8 +25,10 @@ func TestSetup(t *testing.T) {
 
 	// Auth
 	_ = os.Setenv("NGINX_UI_AUTH_IP_WHITE_LIST", "127.0.0.1,192.168.1.1")
+	_ = os.Setenv("NGINX_UI_AUTH_TRUSTED_PROXIES", "127.0.0.1,10.0.0.0/8,2001:db8::/32")
 	_ = os.Setenv("NGINX_UI_AUTH_BAN_THRESHOLD_MINUTES", "20")
 	_ = os.Setenv("NGINX_UI_AUTH_MAX_ATTEMPTS", "20")
+	_ = os.Setenv("NGINX_UI_AUTH_SECURE_SESSION_TIMEOUT_MINUTES", "60")
 
 	// Casdoor
 	_ = os.Setenv("NGINX_UI_CASDOOR_ENDPOINT", "https://casdoor.example.com")
@@ -63,6 +65,7 @@ func TestSetup(t *testing.T) {
 	// Http
 	_ = os.Setenv("NGINX_UI_HTTP_GITHUB_PROXY", "http://proxy.example.com")
 	_ = os.Setenv("NGINX_UI_HTTP_INSECURE_SKIP_VERIFY", "true")
+	_ = os.Setenv("NGINX_UI_HTTP_WEBSOCKET_TRUSTED_ORIGINS", "http://localhost:5173,https://admin.example.com")
 
 	// Logrotate
 	_ = os.Setenv("NGINX_UI_LOGROTATE_ENABLED", "true")
@@ -78,6 +81,9 @@ func TestSetup(t *testing.T) {
 	_ = os.Setenv("NGINX_UI_NGINX_RELOAD_CMD", "nginx -s reload")
 	_ = os.Setenv("NGINX_UI_NGINX_RESTART_CMD", "nginx -s restart")
 	_ = os.Setenv("NGINX_UI_NGINX_LOG_DIR_WHITE_LIST", "/var/log/nginx")
+	_ = os.Setenv("NGINX_UI_NGINX_HOST_SERVICE_MANAGER", "launchd")
+	_ = os.Setenv("NGINX_UI_NGINX_HOST_LAUNCHD_SERVICE", "homebrew.mxcl.nginx")
+	_ = os.Setenv("NGINX_UI_NGINX_HOST_LAUNCHCTL_PATH", "/bin/launchctl")
 
 	// Node
 	_ = os.Setenv("NGINX_UI_NODE_NAME", "test")
@@ -115,8 +121,10 @@ func TestSetup(t *testing.T) {
 
 	// Auth
 	assert.Equal(t, []string{"127.0.0.1", "192.168.1.1"}, AuthSettings.IPWhiteList)
+	assert.Equal(t, []string{"127.0.0.1", "10.0.0.0/8", "2001:db8::/32"}, AuthSettings.TrustedProxies)
 	assert.Equal(t, 20, AuthSettings.BanThresholdMinutes)
 	assert.Equal(t, 20, AuthSettings.MaxAttempts)
+	assert.Equal(t, 60, AuthSettings.SecureSessionTimeoutMinutes)
 
 	// Casdoor
 	assert.Equal(t, "https://casdoor.example.com", CasdoorSettings.Endpoint)
@@ -154,7 +162,9 @@ func TestSetup(t *testing.T) {
 
 	// Http
 	assert.Equal(t, "http://proxy.example.com", HTTPSettings.GithubProxy)
+	assert.Equal(t, "http://proxy.example.com:8080", HTTPSettings.HTTPProxy)
 	assert.Equal(t, true, HTTPSettings.InsecureSkipVerify)
+	assert.Equal(t, []string{"http://localhost:5173", "https://admin.example.com"}, HTTPSettings.WebSocketTrustedOrigins)
 
 	// Logrotate
 	assert.Equal(t, true, LogrotateSettings.Enabled)
@@ -168,8 +178,12 @@ func TestSetup(t *testing.T) {
 	assert.Equal(t, "/var/run/nginx.pid", NginxSettings.PIDPath)
 	assert.Equal(t, "nginx -t", NginxSettings.TestConfigCmd)
 	assert.Equal(t, "nginx -s reload", NginxSettings.ReloadCmd)
-	assert.Equal(t, "nginx -s stop", NginxSettings.RestartCmd)
+	assert.Equal(t, "nginx -s restart", NginxSettings.RestartCmd)
 	assert.Equal(t, []string{"/var/log/nginx"}, NginxSettings.LogDirWhiteList)
+	assert.Equal(t, HostServiceManagerLaunchd, NginxSettings.HostServiceManager)
+	assert.Equal(t, "homebrew.mxcl.nginx", NginxSettings.HostLaunchdService)
+	assert.Equal(t, "/bin/launchctl", NginxSettings.HostLaunchctlPath)
+	assert.Empty(t, NginxSettings.GetHostSudoPrefix())
 
 	// Node
 	assert.Equal(t, "test", NodeSettings.Name)
@@ -192,4 +206,29 @@ func TestSetup(t *testing.T) {
 	assert.Equal(t, []string{"http://localhost:3002"}, WebAuthnSettings.RPOrigins)
 
 	os.Clearenv()
+}
+
+func TestGetMaintenanceHost(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "default", want: "http://127.0.0.1:9000"},
+		{name: "custom host", value: "https://maintenance.internal:9443", want: "https://maintenance.internal:9443"},
+		{name: "trailing slash", value: "http://maintenance.internal/", want: "http://maintenance.internal"},
+		{name: "directive injection", value: "http://host; return 200", want: "http://127.0.0.1:9000"},
+		{name: "path", value: "https://maintenance.internal/page", want: "http://127.0.0.1:9000"},
+		{name: "credentials", value: "https://user:pass@maintenance.internal", want: "http://127.0.0.1:9000"},
+		{name: "unsupported scheme", value: "file:///tmp/page", want: "http://127.0.0.1:9000"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			nginxSettings := &Nginx{MaintenanceHost: test.value}
+			if got := nginxSettings.GetMaintenanceHost("http", 9000); got != test.want {
+				t.Fatalf("GetMaintenanceHost() = %q, want %q", got, test.want)
+			}
+		})
+	}
 }

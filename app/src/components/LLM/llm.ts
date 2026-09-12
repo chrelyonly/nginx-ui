@@ -117,7 +117,7 @@ export const useLLMStore = defineStore('llm', () => {
 
   // Update the last assistant message content (for streaming)
   function updateLastAssistantMessage(content: string) {
-    const lastMessage = messages.value[messages.value.length - 1]
+    const lastMessage = messages.value.at(-1)
     if (lastMessage && lastMessage.role === 'assistant') {
       lastMessage.content = content
     }
@@ -374,7 +374,8 @@ export const useLLMStore = defineStore('llm', () => {
     catch (error) {
       console.error('Chat request failed:', error)
       // Remove the empty assistant message on error
-      if (messages.value.length > 0 && messages.value[messages.value.length - 1].content === '') {
+      const lastMessage = messages.value.at(-1)
+      if (lastMessage?.content === '') {
         messages.value.pop()
       }
     }
@@ -451,7 +452,8 @@ export const useLLMStore = defineStore('llm', () => {
 
     try {
       const sessionStore = useLLMSessionStore()
-      await sessionStore.generateSessionTitle(currentSessionId.value)
+      // Pass messages to generate title on main node
+      await sessionStore.generateSessionTitle(currentSessionId.value, messages.value)
     }
     catch (error) {
       console.error('Failed to auto-generate session title:', error)

@@ -61,8 +61,13 @@ func EnrollTOTP(c *gin.Context) {
 	var twoFA struct {
 		Secret   string `json:"secret" binding:"required"`
 		Passcode string `json:"passcode" binding:"required"`
+		Password string `json:"password" binding:"required"`
 	}
 	if !cosy.BindAndValid(c, &twoFA) {
+		return
+	}
+
+	if !verifyCurrentPassword(c, twoFA.Password) {
 		return
 	}
 
@@ -87,7 +92,12 @@ func EnrollTOTP(c *gin.Context) {
 	}
 
 	t := time.Now().Unix()
-	recoveryCodes := model.RecoveryCodes{Codes: generateRecoveryCodes(16), LastViewed: &t}
+	codes, err := generateRecoveryCodes(16)
+	if err != nil {
+		cosy.ErrHandler(c, err)
+		return
+	}
+	recoveryCodes := model.RecoveryCodes{Codes: codes, LastViewed: &t}
 	cUser.RecoveryCodes = recoveryCodes
 	_, err = u.Where(u.ID.Eq(cUser.ID)).Updates(cUser)
 	if err != nil {

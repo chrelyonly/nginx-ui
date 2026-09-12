@@ -2,8 +2,8 @@ package searcher
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,9 +22,12 @@ type Searcher struct {
 	queryBuilder *QueryBuilder
 	cache        *Cache
 	stats        *searcherStats
+	memoryLimit  *searchMemoryLimiter
 
 	// Concurrency control
 	semaphore chan struct{}
+	stateMu   sync.RWMutex // protects shards and indexAlias
+	swapMu    sync.Mutex   // serializes shard swaps with shutdown
 
 	// State
 	running int32
@@ -52,6 +55,7 @@ func NewSearcher(config *Config, shards []bleve.Index) *Searcher {
 	if config == nil {
 		config = DefaultSearcherConfig()
 	}
+	shards = wrapRecoveringIndexes(shards)
 
 	// Create index alias for global scoring across shards
 	indexAlias := bleve.NewIndexAlias(shards...)
@@ -69,6 +73,7 @@ func NewSearcher(config *Config, shards []bleve.Index) *Searcher {
 		shards:       shards,
 		indexAlias:   indexAlias,
 		queryBuilder: NewQueryBuilder(),
+		memoryLimit:  newSearchMemoryLimiter(config.MemoryQuota),
 		semaphore:    make(chan struct{}, config.MaxConcurrency),
 		stats: &searcherStats{
 			shardStats: make(map[int]*ShardSearchStats),
@@ -132,6 +137,7 @@ func (s *Searcher) Search(ctx context.Context, req *SearchRequest) (*SearchResul
 		searchCtx, cancel = context.WithTimeout(ctx, s.config.TimeoutDuration)
 		defer cancel()
 	}
+	searchCtx = withSearchMemoryLimit(searchCtx, s.memoryLimit)
 
 	// Acquire semaphore for concurrency control
 	select {
@@ -149,12 +155,24 @@ func (s *Searcher) Search(ctx context.Context, req *SearchRequest) (*SearchResul
 	if err != nil {
 		return nil, fmt.Errorf("failed to build query: %w", err)
 	}
+	indexAlias, releaseAlias := s.indexAliasForRequest(req)
+	if indexAlias == nil {
+		return nil, fmt.Errorf("searcher is not running")
+	}
+	defer releaseAlias()
 
 	// Execute search across shards
-	result, err := s.executeDistributedSearch(searchCtx, query, req)
+	result, err := s.executeDistributedSearch(searchCtx, query, req, indexAlias)
 	if err != nil {
 		s.recordSearchMetrics(time.Since(startTime), false)
 		return nil, err
+	}
+
+	// Byte and response-time totals need their own pass over the match set:
+	// the hits carry only the requested page, so summing them would describe
+	// the page rather than the query.
+	if req.IncludeStats {
+		result.Stats = s.searchStats(searchCtx, query, req, result.TotalHits, indexAlias)
 	}
 
 	result.Duration = time.Since(startTime)
@@ -167,76 +185,78 @@ func (s *Searcher) Search(ctx context.Context, req *SearchRequest) (*SearchResul
 	return result, nil
 }
 
-// SearchAsync performs asynchronous search
-func (s *Searcher) SearchAsync(ctx context.Context, req *SearchRequest) (<-chan *SearchResult, <-chan error) {
-	resultChan := make(chan *SearchResult, 1)
-	errorChan := make(chan error, 1)
-
-	go func() {
-		defer close(resultChan)
-		defer close(errorChan)
-
-		result, err := s.Search(ctx, req)
-		if err != nil {
-			errorChan <- err
-		} else {
-			resultChan <- result
-		}
-	}()
-
-	return resultChan, errorChan
-}
-
 // executeDistributedSearch executes search across all healthy shards
-func (s *Searcher) executeDistributedSearch(ctx context.Context, query query.Query, req *SearchRequest) (*SearchResult, error) {
+func (s *Searcher) executeDistributedSearch(
+	ctx context.Context,
+	query query.Query,
+	req *SearchRequest,
+	indexAlias bleve.IndexAlias,
+) (*SearchResult, error) {
 	healthyShards := s.getHealthyShards()
 	if len(healthyShards) == 0 {
 		return nil, fmt.Errorf("no healthy shards available")
 	}
 
-	// If specific log groups are requested via main_log_path, we can still use all shards
-	// because documents are filtered by main_log_path at query level. To avoid unnecessary
-	// shard touches, in future we can maintain a mapping of group->shards and build a
-	// narrowed alias. For now, rely on Bleve to skip shards quickly when the filter eliminates them.
-
 	// Use Bleve's native distributed search with global scoring for consistent pagination
-	return s.executeGlobalScoringSearch(ctx, query, req)
+	return s.executeGlobalScoringSearch(ctx, query, req, indexAlias)
 }
 
 // executeGlobalScoringSearch uses Bleve's native distributed search with global scoring
 // This ensures consistent pagination by letting Bleve handle cross-shard ranking
-func (s *Searcher) executeGlobalScoringSearch(ctx context.Context, query query.Query, req *SearchRequest) (*SearchResult, error) {
+func (s *Searcher) executeGlobalScoringSearch(
+	ctx context.Context,
+	query query.Query,
+	req *SearchRequest,
+	indexAlias bleve.IndexAlias,
+) (*SearchResult, error) {
 	// Create search request with proper pagination
 	searchReq := bleve.NewSearchRequest(query)
 
-	// Set pagination parameters directly - Bleve will handle distributed pagination correctly
-	searchReq.Size = req.Limit
-	if searchReq.Size <= 0 {
+	// Set pagination parameters directly - Bleve will handle distributed pagination correctly.
+	// A negative Limit explicitly requests zero hits (facet/aggregation-only queries);
+	// zero means "unset" and falls back to the default page size.
+	switch {
+	case req.Limit < 0:
+		searchReq.Size = 0
+	case req.Limit == 0:
 		searchReq.Size = 50 // Default page size
+	default:
+		searchReq.Size = req.Limit
 	}
 	searchReq.From = req.Offset
 
 	// Configure the search request with proper sorting and other settings
 	s.configureSearchRequest(searchReq, req)
 
-	// Enable global scoring for distributed search consistency
-	// This is the key fix from Bleve documentation for distributed search
-	globalCtx := context.WithValue(ctx, search.SearchTypeKey, search.GlobalScoring)
-
-	// Debug: Log the constructed query for comparison
-	if queryBytes, err := json.Marshal(searchReq.Query); err == nil {
-		logger.Debugf("Main search query: %s", string(queryBytes))
-		logger.Debugf("Main search Size=%d, From=%d, Fields=%v", searchReq.Size, searchReq.From, searchReq.Fields)
+	// Global scoring runs an extra pre-search round across all shards to gather
+	// term statistics for consistent TF-IDF ranking. That only matters when
+	// results are ranked by relevance score; all other sort orders (the default
+	// timestamp sort, facet-only queries) don't read scores, so skip the overhead.
+	searchCtx := ctx
+	if req.SortBy == "_score" {
+		searchCtx = context.WithValue(ctx, search.SearchTypeKey, search.GlobalScoring)
 	}
 
-	// Execute search using Bleve's IndexAlias with global scoring
-	result, err := s.indexAlias.SearchInContext(globalCtx, searchReq)
+	// Execute search using Bleve's IndexAlias
+	result, err := indexAlias.SearchInContext(searchCtx, searchReq)
 	if err != nil {
-		return nil, fmt.Errorf("global scoring search failed: %w", err)
+		return nil, fmt.Errorf("distributed search failed: %w", err)
+	}
+	if err := searchResultError(result); err != nil {
+		return nil, err
 	}
 
 	// Convert Bleve result to our SearchResult format
 	return s.convertBleveResult(result), nil
+}
+
+func (s *Searcher) indexAliasForRequest(req *SearchRequest) (bleve.IndexAlias, func()) {
+	s.stateMu.RLock()
+	defaultAlias := s.indexAlias
+	shards := append([]bleve.Index(nil), s.shards...)
+	s.stateMu.RUnlock()
+
+	return indexAliasForLogPaths(defaultAlias, shards, req.UseMainLogPath, req.LogPaths)
 }
 
 // convertBleveResult converts a Bleve SearchResult to our SearchResult format
@@ -256,6 +276,7 @@ func (s *Searcher) convertBleveResult(bleveResult *bleve.SearchResult) *SearchRe
 			Fields:       hit.Fields,
 			Highlighting: hit.Fragments,
 			Index:        hit.Index,
+			Sort:         hit.Sort,
 		}
 		result.Hits = append(result.Hits, searchHit)
 	}
@@ -284,6 +305,21 @@ func (s *Searcher) convertBleveResult(bleveResult *bleve.SearchResult) *SearchRe
 			// This addresses the issue where Bleve may incorrectly aggregate Total values
 			// across multiple shards in IndexAlias
 			convertedFacet.Total = len(facetTerms)
+		} else if len(facet.NumericRanges) > 0 {
+			// Numeric range facets (e.g. the numeric status field) report their
+			// buckets as NumericRanges. Expose non-empty ranges as terms so all
+			// facets can be consumed uniformly.
+			convertedFacet.Terms = make([]*FacetTerm, 0, len(facet.NumericRanges))
+			for _, nr := range facet.NumericRanges {
+				if nr.Count == 0 {
+					continue
+				}
+				convertedFacet.Terms = append(convertedFacet.Terms, &FacetTerm{
+					Term:  nr.Name,
+					Count: nr.Count,
+				})
+			}
+			convertedFacet.Total = len(convertedFacet.Terms)
 		} else {
 			// If there are no terms, Total should be 0
 			convertedFacet.Total = 0
@@ -308,11 +344,21 @@ func (s *Searcher) configureSearchRequest(searchReq *bleve.SearchRequest, req *S
 		sortOrder = SortOrderDesc // Default sort order
 	}
 
-	// Apply Bleve sorting - use "-" prefix for descending order
+	// Apply Bleve sorting - use "-" prefix for descending order.
+	// Always append the document ID as a final tiebreaker: the primary sort
+	// key (usually second-resolution timestamps) is not unique, and a
+	// deterministic total order is required for stable pagination and
+	// SearchAfter cursors.
 	if sortOrder == SortOrderDesc {
-		searchReq.SortBy([]string{"-" + sortField})
+		searchReq.SortBy([]string{"-" + sortField, "_id"})
 	} else {
-		searchReq.SortBy([]string{sortField})
+		searchReq.SortBy([]string{sortField, "_id"})
+	}
+
+	// Cursor-based pagination: resume strictly after the given sort values
+	if len(req.SearchAfter) > 0 {
+		searchReq.SearchAfter = req.SearchAfter
+		searchReq.From = 0 // SearchAfter and From are mutually exclusive
 	}
 
 	// Configure highlighting
@@ -341,6 +387,11 @@ func (s *Searcher) configureSearchRequest(searchReq *bleve.SearchRequest, req *S
 				size = req.FacetSize
 			}
 			facet := bleve.NewFacetRequest(field, size)
+			// The status field is indexed as numeric, so a terms facet cannot
+			// bucket it. Add one numeric range per HTTP status code instead.
+			if field == "status" {
+				addStatusCodeRanges(facet)
+			}
 			searchReq.AddFacet(field, facet)
 		}
 	}
@@ -353,25 +404,62 @@ func (s *Searcher) configureSearchRequest(searchReq *bleve.SearchRequest, req *S
 	}
 }
 
+// statusCodeFacetRange is a precomputed numeric facet bucket for one HTTP
+// status code.
+type statusCodeFacetRange struct {
+	name string
+	min  float64
+	max  float64
+}
+
+// statusCodeFacetRanges holds one numeric range per HTTP status code (100-599).
+// It is built once at startup so that faceting the numeric status field does
+// not rebuild the full range set on every search request.
+var statusCodeFacetRanges = func() []statusCodeFacetRange {
+	ranges := make([]statusCodeFacetRange, 0, 500)
+	for code := 100; code <= 599; code++ {
+		ranges = append(ranges, statusCodeFacetRange{
+			name: strconv.Itoa(code),
+			min:  float64(code),
+			max:  float64(code + 1),
+		})
+	}
+	return ranges
+}()
+
+// addStatusCodeRanges attaches one numeric range per HTTP status code to the
+// facet request. The status field is indexed as numeric, so it must be faceted
+// with numeric ranges rather than terms; each range is named after the status
+// code so the converted facet exposes the code itself as the term.
+func addStatusCodeRanges(facet *bleve.FacetRequest) {
+	for i := range statusCodeFacetRanges {
+		r := &statusCodeFacetRanges[i]
+		facet.AddNumericRange(r.name, &r.min, &r.max)
+	}
+}
+
 // Utility methods
 
 func (s *Searcher) setRequestDefaults(req *SearchRequest) {
 	if req.Timeout == 0 {
 		req.Timeout = s.config.TimeoutDuration
 	}
+	// Only downgrade: callers may opt out of caching (e.g. one-off batch scans
+	// whose results would churn the cache), so never force UseCache back on.
 	if req.UseCache && !s.config.EnableCache {
 		req.UseCache = false
-	}
-	if !req.UseCache && s.config.EnableCache {
-		req.UseCache = true
 	}
 }
 
 func (s *Searcher) getHealthyShards() []int {
 	// With IndexAlias, Bleve handles shard health internally
 	// Return all shard IDs since the alias will route correctly
-	healthy := make([]int, len(s.shards))
-	for i := range s.shards {
+	s.stateMu.RLock()
+	shardCount := len(s.shards)
+	s.stateMu.RUnlock()
+
+	healthy := make([]int, shardCount)
+	for i := range healthy {
 		healthy[i] = i
 	}
 	return healthy
@@ -456,38 +544,46 @@ func (s *Searcher) GetConfig() *Config {
 	return s.config
 }
 
-// GetShards returns the underlying shards for cardinality counting
+// GetShards returns an isolated shard snapshot for cardinality counting.
 func (s *Searcher) GetShards() []bleve.Index {
-	return s.shards
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+
+	return append([]bleve.Index(nil), s.shards...)
 }
 
 // SwapShards atomically replaces the current shards with new ones using IndexAlias.Swap()
 // This follows Bleve best practices for zero-downtime index updates
 func (s *Searcher) SwapShards(newShards []bleve.Index) error {
+	s.swapMu.Lock()
+	defer s.swapMu.Unlock()
+
 	if atomic.LoadInt32(&s.running) == 0 {
 		return fmt.Errorf("searcher is not running")
 	}
 
+	newShards = wrapRecoveringIndexes(newShards)
+	if len(newShards) == 0 {
+		return fmt.Errorf("cannot swap to an empty shard set")
+	}
+
+	s.stateMu.Lock()
 	if s.indexAlias == nil {
+		s.stateMu.Unlock()
 		return fmt.Errorf("indexAlias is nil")
 	}
 
-	// Store old shards for logging
 	oldShards := s.shards
-
-	// Perform atomic swap using IndexAlias - this is the key Bleve operation
-	// that provides zero-downtime index updates
 	logger.Debugf("SwapShards: Starting atomic swap - old=%d, new=%d", len(oldShards), len(newShards))
 
 	swapStartTime := time.Now()
 	s.indexAlias.Swap(newShards, oldShards)
 	swapDuration := time.Since(swapStartTime)
+	s.shards = newShards
+	s.stateMu.Unlock()
 
 	logger.Infof("IndexAlias.Swap completed in %v (old=%d shards, new=%d shards)",
 		swapDuration, len(oldShards), len(newShards))
-
-	// Update internal shards reference to match the IndexAlias
-	s.shards = newShards
 
 	// Clear cache after shard swap to prevent stale results
 	// Use goroutine to avoid potential deadlock during shard swap
@@ -544,8 +640,14 @@ func (s *Searcher) Stop() error {
 	var err error
 
 	s.closeOnce.Do(func() {
+		s.swapMu.Lock()
+		defer s.swapMu.Unlock()
+
 		// Set running to 0
 		atomic.StoreInt32(&s.running, 0)
+
+		s.stateMu.Lock()
+		defer s.stateMu.Unlock()
 
 		// Close the index alias first (this doesn't close underlying indexes)
 		if s.indexAlias != nil {

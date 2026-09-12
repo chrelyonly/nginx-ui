@@ -117,6 +117,10 @@ If the `--sbin-path` path can be obtained, Nginx UI will use the following comma
 start-stop-daemon --start --quiet --pidfile $PID --exec $SBIN_PATH
 ```
 
+::: tip Host via SSH mode
+In Host via SSH mode, a non-empty `TestConfigCmd`, `ReloadCmd` or `RestartCmd` is run on the host through `/bin/sh -c` as the SSH user. When they are empty, Nginx UI tests with the host nginx binary and reloads or restarts through systemd or launchd instead. See [Manage Host Nginx from Docker](manage-host-nginx-from-docker.md).
+:::
+
 ### StubStatusPort
 - Type: `uint`
 - Default: `51820`
@@ -127,6 +131,43 @@ This option is used to set the port for the Nginx stub status module. The stub s
 ::: tip Tip
 Make sure the port you set is not being used by other services.
 :::
+
+## Maintenance Page
+
+### MaintenanceDir
+- Type: `string`
+- Default: `/etc/nginx/maintenance`
+- Environment Variable: `NGINX_UI_NGINX_MAINTENANCE_DIR`
+
+This option is used to set the directory that Nginx UI reads custom maintenance page templates from. If it is empty, `/etc/nginx/maintenance` is used.
+
+### MaintenanceTemplate
+- Type: `string`
+- Environment Variable: `NGINX_UI_NGINX_MAINTENANCE_TEMPLATE`
+- Example: `maintenance.html`
+
+This option is used to select a custom HTML template for the Nginx UI maintenance page. You can set it through the environment variable or in Settings > Nginx.
+
+Only the file name is used. Path components in the configured value are ignored, and the template is loaded from the maintenance directory in the following order:
+
+1. `<MaintenanceDir>/<site name>.<filename>`, the template dedicated to the site under maintenance;
+2. `<MaintenanceDir>/<filename>`, the generic template shared by all sites.
+
+For example, with `MaintenanceTemplate=maintenance.html`, the site `example.com` first tries `/etc/nginx/maintenance/example.com.maintenance.html`, then falls back to `/etc/nginx/maintenance/maintenance.html`.
+
+If this option is empty, no file can be read, or the files are empty, Nginx UI falls back to the built-in maintenance page template.
+
+For Docker deployments, mount a host directory to the maintenance directory and put your template files there:
+
+```yaml
+services:
+  nginx-ui:
+    image: uozi/nginx-ui:latest
+    volumes:
+      - ./maintenance:/etc/nginx/maintenance
+    environment:
+      - NGINX_UI_NGINX_MAINTENANCE_TEMPLATE=maintenance.html
+```
 
 ## Container Control
 
@@ -146,4 +187,54 @@ If this option is not empty, Nginx UI will control the Nginx service running in 
 If you are using the official Nginx UI container and want to control Nginx in another container, you must map the host's docker.sock to the Nginx UI container.
 
 For example: `-v /var/run/docker.sock:/var/run/docker.sock`
+
+Nginx UI reads and writes Nginx configuration and log files through its own filesystem. Mount the same configuration and log directories at the same paths in both containers. The configuration mount must be writable in the Nginx UI container; it can remain read-only in the Nginx container. Mapping `docker.sock` and setting `ContainerName` only route status checks and control commands to the other container.
 :::
+
+## Host SSH Control
+
+For deployments where Nginx UI runs in a Docker container but Nginx is installed natively on the host machine, Nginx UI provides a third control mode that uses SSH for command execution and either SFTP or bind-mounts for file I/O. Linux systemd services and macOS Homebrew launchd services are supported.
+
+### Constraints
+
+::: warning Constraints
+- **Same-host only**: the Nginx UI container and the target nginx process must be on the same physical/virtual machine. For multi-host management, see [Manage Multi-Host Nginx with Cluster](manage-multi-host-nginx-with-cluster.md).
+- On Linux, nginx must be managed by systemd and the SSH user must be allowed to invoke a narrow command set through passwordless `sudo -n`.
+- On macOS, nginx must run as a Homebrew user service. The configured SSH user must be the login user that owns `homebrew.mxcl.nginx`; sudo is not used.
+:::
+
+### Quick start
+
+1. From the Web UI, go to **Preferences → Nginx**, select **Host via SSH** mode, and open the setup wizard.
+2. Follow the five-step wizard (**SSH Target**, **Trust & Test**, **Detect Platform**, **Access & Install**, **Verify**): choose or generate a keypair, trust the host key and test the connection, detect the service manager and nginx paths, pick the file access mode and apply the generated container and host snippets, then run the verification.
+3. Once all checks pass, save the configuration.
+
+Alternatively, use the CLI:
+
+```bash
+nginx-ui host-setup print --host-address host.docker.internal:22 --host-user nginxui --access-mode sftp
+nginx-ui host-setup test
+```
+
+### Configuration fields
+
+| Field | Description |
+|---|---|
+| `host_mode` | Set to `ssh` to enable this mode |
+| `host_access_mode` | `sftp` or `mounted`. Required in SSH mode: whether the container reaches the host nginx files over SFTP or through bind mounts |
+| `host_key_source` | `generated` (default), `existing` or `provided`: where the SSH private key comes from |
+| `host_address` | Remote `host:port` |
+| `host_user` | SSH user on the host |
+| `host_private_key_path` | Private key path inside the container |
+| `host_known_hosts_path` | known_hosts allow-list path inside the container |
+| `host_sudo_prefix` | Prefix used for privileged commands. Default `sudo -n` |
+| `host_service_manager` | `systemd` (default) or `launchd` |
+| `host_systemd_unit_name` | Default `nginx.service` |
+| `host_systemctl_path` | Default `/bin/systemctl` |
+| `host_launchd_service` | Default `homebrew.mxcl.nginx` |
+| `host_launchctl_path` | Default `/bin/launchctl` |
+| `host_config_dir` | Host-side nginx config directory |
+| `host_log_dir` | Host-side nginx log directory |
+| `sbin_path` | Optional in SSH mode: the nginx binary on the host. When empty, Nginx UI resolves the service manager default (`/usr/sbin/nginx` for systemd, `/opt/homebrew/opt/nginx/bin/nginx` for launchd) and stores it when the control settings are saved. The generated sudoers allow-list matches the resolved path exactly |
+
+See also: [Manage Host Nginx from Docker](manage-host-nginx-from-docker.md) and [Manage Multi-Host Nginx with Cluster](manage-multi-host-nginx-with-cluster.md).

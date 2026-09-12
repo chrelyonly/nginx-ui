@@ -24,10 +24,10 @@ type NotificationCall struct {
 
 // Directories to exclude
 var excludeDirs = []string{
-	".devcontainer", ".github", ".idea", ".pnpm-store",
+	".devcontainer", ".github", ".idea", ".bun",
 	".vscode", "app", "query", "tmp", "cmd", ".git", ".go", ".claude",
 	".cunzhi-memory", ".cursor", ".github", ".idea",
-	".vscode", ".pnpm-store",
+	".vscode", ".bun",
 }
 
 // Main function
@@ -249,7 +249,7 @@ func generateSingleTSFile(root string, calls []NotificationCall) {
 			// Write record with both title and content as functions
 			content.WriteString(fmt.Sprintf("  '%s': {\n", uniqueKey))
 			content.WriteString(fmt.Sprintf("    title: () => $gettext('%s'),\n", escapedTitle))
-			content.WriteString(fmt.Sprintf("    content: (args: any) => $gettext('%s', args, true),\n", escapedContent))
+			content.WriteString(fmt.Sprintf("    content: (args: any) => $gettext('%s', args),\n", escapedContent))
 			content.WriteString("  },\n")
 		}
 	}

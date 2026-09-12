@@ -1,7 +1,7 @@
 package cert
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"runtime"
 	"time"
@@ -13,11 +13,11 @@ import (
 	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/0xJacky/Nginx-UI/query"
 	"github.com/0xJacky/Nginx-UI/settings"
-	"github.com/go-acme/lego/v4/challenge/dns01"
-	"github.com/go-acme/lego/v4/challenge/http01"
-	"github.com/go-acme/lego/v4/lego"
-	legolog "github.com/go-acme/lego/v4/log"
-	dnsproviders "github.com/go-acme/lego/v4/providers/dns"
+	"github.com/go-acme/lego/v5/challenge/dns01"
+	"github.com/go-acme/lego/v5/challenge/http01"
+	"github.com/go-acme/lego/v5/lego"
+	legolog "github.com/go-acme/lego/v5/log"
+	dnsproviders "github.com/go-acme/lego/v5/providers/dns"
 	"github.com/uozi-tech/cosy"
 	"github.com/uozi-tech/cosy/logger"
 	cSettings "github.com/uozi-tech/cosy/settings"
@@ -26,6 +26,8 @@ import (
 const (
 	HTTP01 = "http01"
 	DNS01  = "dns01"
+
+	disabledAuthoritativeNSPropagationWait = time.Minute
 )
 
 func IssueCert(payload *ConfigPayload, certLogger *Logger) error {
@@ -38,20 +40,21 @@ func IssueCert(payload *ConfigPayload, certLogger *Logger) error {
 			logger.Errorf("%s\n%s", err, buf)
 		}
 	}()
+	payload.KeyType = payload.GetKeyType()
+	if err := NormalizeAndValidateIdentifiers(payload); err != nil {
+		return err
+	}
 
 	// initial a channelWriter to receive logs
 	cw := NewChannelWriter()
 	defer close(cw.Ch)
 
-	// initial a logger
-	l := log.New(os.Stderr, "", log.LstdFlags)
-	l.SetOutput(cw)
-
 	// Hijack the (logger) of lego
-	legolog.Logger = l
+	oldLogger := legolog.Default()
+	legolog.SetDefault(slog.New(slog.NewTextHandler(cw, nil)))
 	// Restore the original logger, fix #876
 	defer func() {
-		legolog.Logger = log.New(os.Stderr, "", log.LstdFlags)
+		legolog.SetDefault(oldLogger)
 	}()
 
 	certLogger.Info(translation.C("[Nginx UI] Preparing lego configurations"))
@@ -87,13 +90,14 @@ func IssueCert(payload *ConfigPayload, certLogger *Logger) error {
 		config.HTTPClient.Transport = t
 	}
 
-	config.Certificate.KeyType = payload.GetKeyType()
-
 	certLogger.Info(translation.C("[Nginx UI] Creating client facilitates communication with the CA server"))
 	// A client facilitates communication with the CA server.
 	client, err := lego.NewClient(config)
 	if err != nil {
 		return cosy.WrapErrorWithParams(ErrNewLegoClient, err.Error())
+	}
+	if err = resolveCertificateProfile(payload, client.GetServerMetadata().Profiles); err != nil {
+		return err
 	}
 
 	switch payload.ChallengeMethod {
@@ -133,15 +137,25 @@ func IssueCert(payload *ConfigPayload, certLogger *Logger) error {
 			if err != nil {
 				return cosy.WrapErrorWithParams(ErrNewDNSChallengeProvider, err.Error())
 			}
-			challengeOptions := make([]dns01.ChallengeOption, 0)
-
 			if len(settings.CertSettings.RecursiveNameservers) > 0 {
-				challengeOptions = append(challengeOptions,
-					dns01.AddRecursiveNameservers(settings.CertSettings.RecursiveNameservers),
-				)
+				oldDNSClient := dns01.DefaultClient()
+				dns01.SetDefaultClient(dns01.NewClient(&dns01.Options{
+					RecursiveNameservers: settings.CertSettings.RecursiveNameservers,
+				}))
+				defer dns01.SetDefaultClient(oldDNSClient)
 			}
 
-			err = client.Challenge.SetDNS01Provider(provider, challengeOptions...)
+			// lego v5 enabled the recursive-nameserver propagation check by
+			// default, which queries the local system resolver for the
+			// _acme-challenge TXT record. Split-horizon or private resolvers
+			// (systemd-resolved at 127.0.0.53, Unbound, Docker DNS, etc.)
+			// frequently REFUSE these queries, so DNS-01 issuance/renewal that
+			// worked under lego v4 started timing out after the v5 migration.
+			// Default to the v4 behavior by only requiring propagation to the
+			// authoritative nameservers. A per-certificate option can also skip
+			// that local pre-check when the authoritative path is unreliable.
+			// Fixes #1711, #1719.
+			err = client.Challenge.SetDNS01Provider(provider, dns01ChallengeOptions(payload)...)
 		} else {
 			return ErrEnvironmentConfigurationIsEmpty
 		}
@@ -174,7 +188,8 @@ func IssueCert(payload *ConfigPayload, certLogger *Logger) error {
 		}
 	}
 
-	if time.Since(payload.NotBefore).Hours()/24 <= 21 &&
+	if canUseLegoRenew(payload) &&
+		time.Since(payload.NotBefore).Hours()/24 <= 21 &&
 		payload.Resource != nil && payload.Resource.Certificate != nil {
 		err = renew(payload, client, certLogger)
 		if err != nil {
@@ -224,4 +239,35 @@ func IssueCert(payload *ConfigPayload, certLogger *Logger) error {
 	time.Sleep(2 * time.Second)
 
 	return nil
+}
+
+func dns01ChallengeOptions(payload *ConfigPayload) []dns01.ChallengeOption {
+	if wait := dns01PropagationWait(payload); wait > 0 {
+		// No active propagation check remains in this mode, so wait before
+		// asking the ACME server to validate the newly published TXT record.
+		return []dns01.ChallengeOption{
+			dns01.PropagationWait(wait, true),
+		}
+	}
+
+	return []dns01.ChallengeOption{
+		dns01.DisableRecursiveNSsPropagationRequirement(),
+	}
+}
+
+func dns01PropagationWait(payload *ConfigPayload) time.Duration {
+	if payload != nil && payload.DisableAuthoritativeNSPropagation {
+		return disabledAuthoritativeNSPropagationWait
+	}
+	return 0
+}
+
+func canUseLegoRenew(payload *ConfigPayload) bool {
+	if payload == nil {
+		return true
+	}
+
+	// lego.RenewOptions does not expose EnableCommonName or ReplacesCertID,
+	// so use the obtain flow when either option is required.
+	return !payload.EnableCommonName && payload.ReplacesCertID == ""
 }

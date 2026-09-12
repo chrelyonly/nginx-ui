@@ -44,6 +44,9 @@ func GenerateAllModel() []any {
 		DnsCredential{},
 		DnsDomain{},
 		Node{},
+		NodeCredential{},
+		NodeControllerCredential{},
+		MCPServiceToken{},
 		Notification{},
 		AcmeUser{},
 		BanIP{},
@@ -53,6 +56,7 @@ func GenerateAllModel() []any {
 		ExternalNotify{},
 		AutoBackup{},
 		SiteConfig{},
+		SiteHealthAlertState{},
 		NginxLogIndex{},
 		UpstreamConfig{},
 	}

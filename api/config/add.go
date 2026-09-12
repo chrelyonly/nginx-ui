@@ -2,10 +2,9 @@ package config
 
 import (
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
+	"github.com/0xJacky/Nginx-UI/api"
 	"github.com/0xJacky/Nginx-UI/internal/config"
 	"github.com/0xJacky/Nginx-UI/internal/helper"
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
@@ -32,40 +31,68 @@ func AddConfig(c *gin.Context) {
 	decodedBaseDir := helper.UnescapeURL(json.BaseDir)
 	decodedName := helper.UnescapeURL(name)
 
-	dir := nginx.GetConfPath(decodedBaseDir)
-	path := filepath.Join(dir, decodedName)
-	if !helper.IsUnderDirectory(path, nginx.GetConfPath()) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"message": "filepath is not under the nginx conf path",
-		})
+	dir, err := config.ResolveConfPath(decodedBaseDir)
+	if err != nil {
+		cosy.ErrHandler(c, err)
 		return
 	}
 
-	if !json.Overwrite && helper.FileExists(path) {
-		c.JSON(http.StatusNotAcceptable, gin.H{
-			"message": "File exists",
-		})
+	path, err := config.ResolveConfPath(decodedBaseDir, decodedName)
+	if err != nil {
+		cosy.ErrHandler(c, err)
 		return
+	}
+
+	err = config.ValidateConfigFile(path, content)
+	if err != nil {
+		cosy.ErrHandler(c, err)
+		return
+	}
+
+	if !json.Overwrite {
+		exists, existsErr := nginx.Exists(path)
+		if existsErr != nil {
+			cosy.ErrHandler(c, existsErr)
+			return
+		}
+		if exists {
+			c.JSON(http.StatusNotAcceptable, gin.H{
+				"message": "File exists",
+			})
+			return
+		}
 	}
 
 	// check if the dir exists, if not, use mkdirAll to create the dir
-	if !helper.FileExists(dir) {
-		err := os.MkdirAll(dir, 0755)
+	dirExists, err := nginx.Exists(dir)
+	if err != nil {
+		cosy.ErrHandler(c, err)
+		return
+	}
+	if !dirExists {
+		err = nginx.MkdirAll(dir, 0755)
 		if err != nil {
 			cosy.ErrHandler(c, err)
 			return
 		}
 	}
 
-	err := os.WriteFile(path, []byte(content), 0644)
-	if err != nil {
-		cosy.ErrHandler(c, err)
+	// Hold the apply lock for the whole write -> test -> reload sequence so a
+	// concurrent mutation cannot make this request fail on somebody else's file.
+	release := config.LockApply()
+	defer release()
+
+	tx := &config.FileTransaction{}
+	if err = tx.Write(path, []byte(content), 0644); err != nil {
+		cosy.ErrHandler(c, config.RollbackError(err, tx.Rollback))
 		return
 	}
 
-	res := nginx.Control(nginx.Reload)
-	if res.IsError() {
-		res.RespError(c)
+	// A file Nginx rejects must not survive on disk. The running instance keeps
+	// its valid in-memory configuration, so an untested write only breaks the
+	// next Nginx start. A newly created file is removed by the rollback.
+	if err = tx.TestAndReload(); err != nil {
+		cosy.ErrHandler(c, err)
 		return
 	}
 
@@ -89,7 +116,7 @@ func AddConfig(c *gin.Context) {
 		return
 	}
 
-	err = config.SyncToRemoteServer(cfg)
+	err = config.SyncToRemoteServer(cfg, api.CurrentUser(c).Name)
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return

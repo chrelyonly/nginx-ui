@@ -13,7 +13,7 @@ Para consultar la documentación, visite [nginxui.com](https://nginxui.com).
 
 ## Stargazers en el tiempo
 
-[![Stargazers over time](https://starchart.cc/0xJacky/nginx-ui.svg)](https://starchart.cc/0xJacky/nginx-ui)
+[![Stargazers over time](https://cloud.nginxui.com/stars/0xJacky/nginx-ui.svg)](https://cloud.nginxui.com/stars/0xJacky/nginx-ui.svg)
 
 
 [English](../../README.md) | Español | [简体中文](README-zh_CN.md) | [繁體中文](README-zh_TW.md)
@@ -113,7 +113,7 @@ http {
 }
 ```
 
-Para más información: [debian/conf/nginx.conf](https://salsa.debian.org/nginx-team/nginx/-/blob/master/debian/conf/nginx.conf#L59-L60)
+Para más información: [debian/conf/nginx.conf](https://salsa.debian.org/nginx-team/nginx/-/blob/debian/latest/debian/conf/nginx.conf#L60-L61)
 
 ### Instalación
 
@@ -178,6 +178,7 @@ Nuestra imagen dpcker [uozi/nginx-ui:latest](https://hub.docker.com/r/uozi/nginx
 ##### Nota
 1. Cuando utilice este contenedor por primera vez, asegúrese de que el volumen mapeado a /etc/nginx esté vacío.
 2. Si desea incluir archivos estáticos, puede mapear directorios al contenedor.
+3. If you are upgrading from an older image, see the [Docker WebSocket fix guide](https://nginxui.com/guide/docker-websocket-fix.html) for required `conf.d/nginx-ui.conf` updates.
 
 **Ejemplo de desplegado Docker**
 
@@ -215,8 +216,8 @@ En plataformas que no tienen una versión de compilación oficial, pueden compil
 Ejecute el siguiente comando en el directorio `app`.
 
 ```shell
-pnpm install
-pnpm build
+bun install
+bun run build
 ```
 
 ### Compilación del Backend
@@ -303,6 +304,16 @@ Si tiene una sugerencia que mejoraría este proyecto, bifurque el repositorio y 
 3. Commit de tus cambios (`git commit -m 'Add some AmazingFeature'`)
 4. Push al branch (`git push origin feature/AmazingFeature`)
 5. Abrir un Pull Request
+
+## Comunidad
+
+Únete al grupo oficial de la comunidad de Nginx UI en WeChat para hablar con otros usuarios sobre uso, despliegue y resolución de problemas.
+
+Escanea el siguiente código QR para agregarnos en WeChat e incluye `Nginx UI Community Group` en tu solicitud. Un administrador te invitará al grupo oficial de la comunidad.
+
+<p align="center">
+  <img src="../../docs/public/assets/wechat-community-qr.png" alt="Nginx UI WeChat Community QR Code" width="320">
+</p>
 
 ## Licencia
 

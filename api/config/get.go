@@ -2,7 +2,6 @@ package config
 
 import (
 	"net/http"
-	"os"
 	"path/filepath"
 
 	"github.com/0xJacky/Nginx-UI/internal/config"
@@ -14,27 +13,27 @@ import (
 )
 
 func GetConfig(c *gin.Context) {
-	path := helper.UnescapeURL(c.Query("path"))
-
-	var absPath string
-	if filepath.IsAbs(path) {
-		absPath = path
-	} else {
-		absPath = nginx.GetConfPath(path)
+	// An encoded value is already exact, so it must not also go through the
+	// repeated-unescape loop — a filename containing a literal '%' would be
+	// corrupted by it. Raw values keep the historical behaviour.
+	path, encoded := helper.DecodePathParam(c.Query("path"))
+	if !encoded {
+		path = helper.UnescapeURL(path)
 	}
 
-	if !helper.IsUnderDirectory(absPath, nginx.GetConfPath()) {
-		cosy.ErrHandler(c, cosy.WrapErrorWithParams(config.ErrPathIsNotUnderTheNginxConfDir, absPath, nginx.GetConfPath()))
-		return
-	}
-
-	stat, err := os.Stat(absPath)
+	absPath, err := config.ResolveAbsoluteOrRelativeConfPath(path)
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return
 	}
 
-	content, err := os.ReadFile(absPath)
+	stat, err := nginx.Stat(absPath)
+	if err != nil {
+		cosy.ErrHandler(c, err)
+		return
+	}
+
+	content, err := nginx.ReadFile(absPath)
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return

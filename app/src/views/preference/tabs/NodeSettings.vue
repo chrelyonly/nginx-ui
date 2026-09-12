@@ -9,7 +9,10 @@ const { data, errors } = storeToRefs(systemSettingsStore)
 <template>
   <AForm layout="vertical">
     <AFormItem :label="$gettext('Node Secret')">
-      <SensitiveString :value="data.node.secret" />
+      <SensitiveString path="node.secret" :value="data.node.secret" />
+    </AFormItem>
+    <AFormItem :label="$gettext('Instance ID')">
+      <AInput :value="data.node.instance_id" readonly />
     </AFormItem>
     <AFormItem
       :label="$gettext('Node name')"

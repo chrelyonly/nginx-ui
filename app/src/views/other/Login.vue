@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { KeyOutlined, LoadingOutlined, LockOutlined, UserOutlined } from '@ant-design/icons-vue'
+import type { FormInstance } from 'antdv-next'
+import { KeyOutlined, LoadingOutlined, LockOutlined, UserOutlined } from '@antdv-next/icons'
 import { startAuthentication } from '@simplewebauthn/browser'
-import { Form } from 'ant-design-vue'
 import auth from '@/api/auth'
 import install from '@/api/install'
 import passkey from '@/api/passkey'
@@ -82,16 +82,16 @@ const rulesRef = reactive({
   ],
 })
 
-const { validate, validateInfos, clearValidate } = Form.useForm(modelRef, rulesRef)
+const formRef = ref<FormInstance>()
 const userStore = useUserStore()
 const settingsStore = useSettingsStore()
 const { login, passkeyLogin } = userStore
-const { secureSessionId } = storeToRefs(userStore)
+const { setSecureSession } = userStore
 
 interface LoginSuccessOptions {
   token?: string
-  shortToken?: string
   secureSessionId?: string
+  secureSessionTTL?: number
   loginType?: 'normal' | 'passkey'
   passkeyRawId?: string
   showSuccessMessage?: boolean
@@ -100,7 +100,6 @@ interface LoginSuccessOptions {
 async function handleLoginSuccess(options: LoginSuccessOptions = {}) {
   const {
     token,
-    shortToken,
     secureSessionId: sessionId,
     loginType = 'normal',
     passkeyRawId,
@@ -111,20 +110,20 @@ async function handleLoginSuccess(options: LoginSuccessOptions = {}) {
     message.success($gettext('Login successful'), 1)
   }
 
-  // Handle different login types
   if (loginType === 'passkey' && passkeyRawId && token) {
-    passkeyLogin(passkeyRawId, token, shortToken)
+    passkeyLogin(passkeyRawId, token)
   }
   else if (token) {
-    login(token, shortToken)
+    login(token)
   }
 
   await nextTick()
 
   if (sessionId) {
-    secureSessionId.value = sessionId
+    setSecureSession(sessionId, options.secureSessionTTL)
   }
 
+  await userStore.fetchShortToken()
   await userStore.getCurrentUser()
   await nextTick()
   if (gettext.current !== 'en' && gettext.current !== userStore.info?.language) {
@@ -144,7 +143,7 @@ async function handleLoginSuccess(options: LoginSuccessOptions = {}) {
 }
 
 function onSubmit() {
-  validate().then(async () => {
+  formRef.value?.validate().then(async () => {
     loading.value = true
 
     await auth.login(modelRef.username, modelRef.password, passcode.value, recoveryCode.value).then(async r => {
@@ -152,13 +151,31 @@ function onSubmit() {
         case 200:
           await handleLoginSuccess({
             token: r.token,
-            shortToken: r.short_token,
             secureSessionId: r.secure_session_id,
+            secureSessionTTL: r.secure_session_ttl,
           })
           break
         case 199:
           enabled2FA.value = true
           break
+        case 198: {
+          if (!r.pre_auth_id || !r.options?.publicKey)
+            throw new Error('Passkey pre-authentication response is incomplete')
+
+          const assertion = await startAuthentication({ optionsJSON: r.options.publicKey })
+          const verified = await auth.finish_passkey_pre_auth({
+            pre_auth_id: r.pre_auth_id,
+            options: assertion,
+          })
+          await handleLoginSuccess({
+            token: verified.token,
+            secureSessionId: verified.secure_session_id,
+            secureSessionTTL: verified.secure_session_ttl,
+            loginType: 'passkey',
+            passkeyRawId: assertion.rawId,
+          })
+          break
+        }
       }
     }).catch(e => {
       if (e.code === 4043) {
@@ -178,7 +195,7 @@ if (user.isLogin) {
 }
 
 watch(() => gettext.current, () => {
-  clearValidate()
+  formRef.value?.clearValidate()
 })
 
 const has_casdoor = ref(false)
@@ -262,8 +279,8 @@ async function handlePasskeyLogin() {
     if (r.token) {
       await handleLoginSuccess({
         token: r.token,
-        shortToken: r.short_token,
         secureSessionId: r.secure_session_id,
+        secureSessionTTL: r.secure_session_ttl,
         loginType: 'passkey',
         passkeyRawId: asseResp.rawId,
       })
@@ -294,61 +311,67 @@ async function handlePasskeyLogin() {
             </div>
           </div>
 
-          <AForm v-else id="components-form-demo-normal-login">
-            <template v-if="!enabled2FA">
-              <AFormItem v-bind="validateInfos.username">
-                <AInput
-                  v-model:value="modelRef.username"
-                  :placeholder="$gettext('Username')"
-                >
-                  <template #prefix>
-                    <UserOutlined style="color: rgba(0, 0, 0, 0.25)" />
-                  </template>
-                </AInput>
-              </AFormItem>
-              <AFormItem v-bind="validateInfos.password">
-                <AInputPassword
-                  v-model:value="modelRef.password"
-                  :placeholder="$gettext('Password')"
-                >
-                  <template #prefix>
-                    <LockOutlined style="color: rgba(0, 0, 0, 0.25)" />
-                  </template>
-                </AInputPassword>
-              </AFormItem>
-              <AButton
-                v-if="has_casdoor"
-                block
-                :loading="loading"
-                class="mb-5"
-                @click="loginWithCasdoor"
-              >
-                {{ $gettext('SSO Login') }}
-              </AButton>
-              <AButton
-                v-if="has_oidc"
-                block
-                :loading="loading"
-                class="mb-5"
-                @click="loginWithOIDC"
-              >
-                {{ $gettext('OIDC Login') }}
-              </AButton>
-            </template>
-            <div v-else>
-              <Authorization
-                ref="refOTP"
-                :two-f-a-status="{
-                  enabled: true,
-                  otp_status: true,
-                  passkey_status: false,
-                  recovery_codes_generated: true,
-                }"
-                @submit-o-t-p="handleOTPSubmit"
-              />
-            </div>
+          <!--
+            The two-factor step is rendered outside the credentials form on
+            purpose: the OTP component brings its own <form> element so that
+            password managers can discover the segmented code fields, and
+            nesting forms is invalid HTML.
+          -->
+          <div v-else-if="enabled2FA">
+            <Authorization
+              ref="refOTP"
+              :two-f-a-status="{
+                enabled: true,
+                otp_status: true,
+                passkey_status: false,
+                recovery_codes_generated: true,
+                recovery_codes_migration_required: false,
+              }"
+              @submit-o-t-p="handleOTPSubmit"
+            />
+          </div>
 
-            <AFormItem v-if="!enabled2FA">
+          <AForm v-else id="components-form-demo-normal-login" ref="formRef" :model="modelRef" :rules="rulesRef">
+            <AFormItem name="username">
+              <AInput
+                v-model:value="modelRef.username"
+                :placeholder="$gettext('Username')"
+              >
+                <template #prefix>
+                  <UserOutlined style="color: rgba(0, 0, 0, 0.25)" />
+                </template>
+              </AInput>
+            </AFormItem>
+            <AFormItem name="password">
+              <AInputPassword
+                v-model:value="modelRef.password"
+                :placeholder="$gettext('Password')"
+              >
+                <template #prefix>
+                  <LockOutlined style="color: rgba(0, 0, 0, 0.25)" />
+                </template>
+              </AInputPassword>
+            </AFormItem>
+            <AButton
+              v-if="has_casdoor"
+              block
+              :loading="loading"
+              class="mb-5"
+              @click="loginWithCasdoor"
+            >
+              {{ $gettext('SSO Login') }}
+            </AButton>
+            <AButton
+              v-if="has_oidc"
+              block
+              :loading="loading"
+              class="mb-5"
+              @click="loginWithOIDC"
+            >
+              {{ $gettext('OIDC Login') }}
+            </AButton>
+
+            <AFormItem>
               <AButton
                 type="primary"
                 block
@@ -411,7 +434,7 @@ async function handlePasskeyLogin() {
             <div class="debug-item">
               <span class="debug-label">Quick Actions:</span>
               <div class="mt-2">
-                <ASpace direction="vertical" :size="8">
+                <ASpace orientation="vertical" :size="8">
                   <AButton size="small" block @click="toggleDebugLoading">
                     {{ (slotDebugData as any).loading ? 'Stop Loading' : 'Toggle Loading' }}
                   </AButton>
@@ -444,7 +467,11 @@ async function handlePasskeyLogin() {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 100vh;
+  // min-height rather than a fixed height: when the form is taller than the
+  // viewport, a centred flex container pushes the overflow out of both ends and
+  // the page background stops covering it.
+  min-height: 100vh;
+  padding: 24px 0;
 
   .login-form {
     max-width: 420px;

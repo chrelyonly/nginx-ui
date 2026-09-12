@@ -4,6 +4,10 @@ import "github.com/uozi-tech/cosy"
 
 var (
 	e                                 = cosy.NewErrorScope("config")
+	ErrConfigFilenameNotAllowed       = e.New(40014, "file name is not allowed: {0}")
+	ErrConfigContentMustBeUTF8Text    = e.New(40015, "file content must be valid UTF-8 text")
+	ErrConfigContentHasControlChars   = e.New(40016, "file content contains invalid control characters")
+	ErrConfigDirectiveNotAllowed      = e.New(40017, "file content contains restricted nginx directive: {0}")
 	ErrPathIsNotUnderTheNginxConfDir  = e.New(50006, "path: {0} is not under the nginx conf dir: {1}")
 	ErrDstFileExists                  = e.New(50007, "destination file: {0} already exists")
 	ErrNginxTestFailed                = e.New(50008, "nginx test failed: {0}")
@@ -11,4 +15,5 @@ var (
 	ErrCannotDeleteProtectedPath      = e.New(50010, "cannot delete protected path")
 	ErrFileNotFound                   = e.New(50011, "file or directory not found: {0}")
 	ErrDeletePathNotUnderNginxConfDir = e.New(50012, "you are not allowed to delete a file outside of the nginx config path")
+	ErrCannotDeleteNginxConfDir       = e.New(50013, "cannot delete the nginx config directory")
 )

@@ -22,10 +22,10 @@ export interface DNSProvider {
 export interface AutoCertOptions {
   name?: string
   domains: string[]
-  ip_address?: string
   code?: string
   dns_credential_id?: number | null
   challenge_method: keyof typeof AutoCertChallengeMethod
+  profile?: string
   configuration?: DNSProvider['configuration']
   key_type: string
   acme_user_id?: number
@@ -33,6 +33,8 @@ export interface AutoCertOptions {
   provider_code?: string
   must_staple?: boolean
   lego_disable_cname_support?: boolean
+  disable_authoritative_ns_propagation?: boolean
+  enable_common_name?: boolean
   revoke_old?: boolean
 }
 

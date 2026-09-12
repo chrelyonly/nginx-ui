@@ -3,26 +3,46 @@ package site
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"runtime"
 	"sync"
 
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
+	"github.com/0xJacky/Nginx-UI/internal/nodeauth"
 	"github.com/0xJacky/Nginx-UI/internal/notification"
 	"github.com/0xJacky/Nginx-UI/model"
-	"github.com/go-resty/resty/v2"
 	"github.com/uozi-tech/cosy/logger"
 )
 
 // Disable disables a site by removing the symlink in sites-enabled
 func Disable(name string) (err error) {
-	enabledConfigFilePath := nginx.GetConfSymlinkPath(nginx.GetConfPath("sites-enabled", name))
-	_, err = os.Stat(enabledConfigFilePath)
+	enabledConfigFilePath, err := resolveEnabledSymlinkPath(name)
 	if err != nil {
+		return err
+	}
+
+	// Remote namespaces keep their deployment intent in the database because no
+	// local symlink is ever created for them.
+	if IsRemoteDeploy(name) {
+		if err = setRemoteEnabled(name, false); err != nil {
+			return
+		}
+
+		go syncDisable(name)
+
 		return
 	}
 
-	err = os.Remove(enabledConfigFilePath)
+	// Already disabled: keep the operation idempotent so cluster syncs can
+	// converge a node without reporting spurious failures.
+	enabledExists, err := nginx.Exists(enabledConfigFilePath)
+	if err != nil {
+		return err
+	}
+	if !enabledExists {
+		return
+	}
+
+	err = nginx.Remove(enabledConfigFilePath)
 	if err != nil {
 		return
 	}
@@ -61,13 +81,12 @@ func syncDisable(name string) {
 			}()
 			defer wg.Done()
 
-			client := resty.New()
+			client := nodeauth.NewRestyClient(node)
 			client.SetBaseURL(node.URL)
 			resp, err := client.R().
-				SetHeader("X-Node-Secret", node.Token).
 				Post(fmt.Sprintf("/api/sites/%s/disable", name))
 			if err != nil {
-				notification.Error("Disable Remote Site Error", "", err.Error())
+				notification.Error("Disable Remote Site Error", err.Error(), nil)
 				return
 			}
 			if resp.StatusCode() != http.StatusOK {

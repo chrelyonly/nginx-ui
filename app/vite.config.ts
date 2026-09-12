@@ -1,14 +1,13 @@
 import { fileURLToPath, URL } from 'node:url'
+import { AntdvNextResolver } from '@antdv-next/auto-import-resolver'
 import vue from '@vitejs/plugin-vue'
 import vueJsx from '@vitejs/plugin-vue-jsx'
 import UnoCSS from 'unocss/vite'
 import AutoImport from 'unplugin-auto-import/vite'
-import { AntDesignVueResolver } from 'unplugin-vue-components/resolvers'
 import Components from 'unplugin-vue-components/vite'
 import DefineOptions from 'unplugin-vue-define-options/vite'
 import { defineConfig, loadEnv } from 'vite'
 import vitePluginBuildId from 'vite-plugin-build-id'
-import Inspect from 'vite-plugin-inspect'
 import svgLoader from 'vite-svg-loader'
 
 // https://vitejs.dev/config/
@@ -18,6 +17,11 @@ export default defineConfig(({ mode }) => {
   return {
     base: './',
     resolve: {
+      dedupe: [
+        'vue',
+        'vue-router',
+        'pinia',
+      ],
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
       },
@@ -39,7 +43,7 @@ export default defineConfig(({ mode }) => {
       svgLoader(),
       UnoCSS(),
       Components({
-        resolvers: [AntDesignVueResolver({ importStyle: false })],
+        resolvers: [AntdvNextResolver()],
         directoryAsNamespace: true,
       }),
       AutoImport({
@@ -62,7 +66,7 @@ export default defineConfig(({ mode }) => {
             '@/composables/useGlobalApp': ['useGlobalApp'],
           },
           {
-            'ant-design-vue': [
+            'antdv-next': [
               'App',
             ],
           },
@@ -74,14 +78,10 @@ export default defineConfig(({ mode }) => {
         },
       }),
       DefineOptions(),
-      Inspect(),
     ],
     css: {
       preprocessorOptions: {
         less: {
-          modifyVars: {
-            'border-radius-base': '5px',
-          },
           javascriptEnabled: true,
         },
       },
@@ -91,13 +91,21 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/api': {
           target: env.VITE_PROXY_TARGET || 'http://localhost:9001',
-          changeOrigin: true,
+          // Keep the browser Origin header. Rewriting it makes websocket
+          // authentication fail when the dev server and backend ports differ.
+          changeOrigin: false,
           secure: false,
+          ws: true,
         },
       },
     },
     build: {
       chunkSizeWarningLimit: 1500,
+    },
+    optimizeDeps: {
+      include: [
+        'antdv-next',
+      ],
     },
   }
 })

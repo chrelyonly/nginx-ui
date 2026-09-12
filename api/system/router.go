@@ -1,22 +1,25 @@
 package system
 
 import (
-	"github.com/0xJacky/Nginx-UI/internal/middleware"
 	"github.com/gin-gonic/gin"
-)
 
-func authIfInstalled(ctx *gin.Context) {
-	if installLockStatus() || isInstallTimeoutExceeded() {
-		middleware.AuthRequired()(ctx)
-	} else {
-		ctx.Next()
-	}
-}
+	"github.com/0xJacky/Nginx-UI/internal/middleware"
+)
 
 func InitPublicRouter(r *gin.RouterGroup) {
 	r.GET("install", InstallLockCheck)
-	r.POST("install", middleware.EncryptedParams(), InstallNginxUI)
 	r.GET("translation/:code", GetTranslation)
+}
+
+func InitSetupRouter(r *gin.RouterGroup) {
+	r.POST("install", middleware.EncryptedParams(), InstallNginxUI)
+
+	g := r.Group("self_check", middleware.Proxy())
+	g.GET("", SelfCheck)
+	g.POST("/:name/fix", SelfCheckFix)
+	g.GET("timeout", TimeoutCheck)
+
+	r.GET("self_check/websocket", middleware.ProxyWs(), CheckWebSocket)
 }
 
 func InitPrivateRouter(r *gin.RouterGroup) {
@@ -26,17 +29,19 @@ func InitPrivateRouter(r *gin.RouterGroup) {
 	r.POST("system/port_scan", PortScan)
 
 	r.Any("system/stats", GetProcessStats)
-	r.Any("system/restart", Restart)
-}
+	// Restarting takes the whole demo container down with it.
+	r.Any("system/restart", middleware.RejectInDemo(), Restart)
 
-func InitSelfCheckRouter(r *gin.RouterGroup) {
-	g := r.Group("self_check", authIfInstalled)
-	g.GET("", middleware.Proxy(), SelfCheck)
-	g.POST("/:name/fix", middleware.Proxy(), SelfCheckFix)
-	g.GET("websocket", middleware.ProxyWs(), CheckWebSocket)
-	g.GET("timeout", middleware.Proxy(), TimeoutCheck)
+	g := r.Group("self_check")
+	g.GET("", SelfCheck)
+	g.POST("/:name/fix", SelfCheckFix)
+	g.GET("timeout", TimeoutCheck)
 }
 
 func InitWebSocketRouter(r *gin.RouterGroup) {
-	r.GET("upgrade/perform", PerformCoreUpgrade)
+	// internal/upgrader/binary.go already turns the install step into a no-op in
+	// demo mode, but the archive is still downloaded and verified first. Refuse
+	// before any of that runs.
+	r.GET("upgrade/perform", middleware.RejectInDemo(), PerformCoreUpgrade)
+	r.GET("self_check/websocket", CheckWebSocket)
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/0xJacky/Nginx-UI/api/event"
 	"github.com/0xJacky/Nginx-UI/api/external_notify"
 	"github.com/0xJacky/Nginx-UI/api/geolite"
+	"github.com/0xJacky/Nginx-UI/api/host"
 	"github.com/0xJacky/Nginx-UI/api/license"
 	"github.com/0xJacky/Nginx-UI/api/llm"
 	"github.com/0xJacky/Nginx-UI/api/nginx"
@@ -34,14 +35,19 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/uozi-tech/cosy"
 	"github.com/uozi-tech/cosy/debug"
+	"github.com/uozi-tech/cosy/logger"
 )
 
 func InitRouter() {
 	r := cosy.GetEngine()
 
+	r.GET("/healthz", public.Healthz)
+
 	r.Use(audit.LoggingMiddleware())
 
-	r.SetTrustedProxies(nil)
+	if err := configureTrustedProxies(r); err != nil {
+		logger.Fatalf("Configure trusted proxies: %v", err)
+	}
 
 	// Add CORS middleware to allow all origins
 	r.Use(middleware.CORS())
@@ -66,20 +72,36 @@ func InitRouter() {
 		license.InitRouter(root)
 
 		system.InitPublicRouter(root)
-		system.InitSelfCheckRouter(root)
 		backup.InitRouter(root)
 
-		// Local-only routes (no proxy) - authorization required
+		setup := root.Group("/setup", middleware.SetupAuthRequired())
+		{
+			system.InitSetupRouter(setup)
+			backup.InitSetupRouter(setup)
+		}
+
+		// Local-only routes (no proxy) - authorization required. Account and
+		// secure-session state belong to the controller that authenticated the
+		// browser, even while the UI is managing a selected remote node.
 		local := root.Group("/", middleware.AuthRequired())
 		{
 			llm.InitLocalRouter(local)
+			user.InitTokenRouter(local)
+			user.InitUserRouter(local)
+		}
+
+		// Local-only WebSocket routes (no proxy). WebSocket handshakes cannot
+		// carry an Authorization header, so they must use AuthRequiredWS, which
+		// also accepts the token from the query string.
+		localWs := root.Group("/", middleware.AuthRequiredWS())
+		{
+			llm.InitLocalWebSocketRouter(localWs)
 		}
 
 		// Authorization required and not websocket request
 		g := root.Group("/", middleware.AuthRequired(), middleware.Proxy())
 		{
 			debug.InitRouter(g)
-			user.InitUserRouter(g)
 			analytic.InitRouter(g)
 			user.InitManageUserRouter(g)
 			nginx.InitRouter(g)
@@ -94,26 +116,30 @@ func InitRouter() {
 			system.InitPrivateRouter(g)
 			settings.InitRouter(g)
 			llm.InitRouter(g)
+			mcp.InitManagementRouter(g)
 			cluster.InitRouter(g)
+			host.InitRouter(g)
 			notification.InitRouter(g)
 			external_notify.InitRouter(g)
 			backup.InitAutoBackupRouter(g)
 			nginxLog.InitRouter(g)
+			upstream.InitHTTPRouter(g)
 			g.GET("/geolite/status", geolite.GetStatus)
 		}
 
-		// Authorization required and websocket request
-		w := root.Group("/", middleware.AuthRequired(), middleware.ProxyWs())
+		// Authorization required and websocket request (no cookie fallback to prevent CSWSH)
+		w := root.Group("/", middleware.AuthRequiredWS(), middleware.ProxyWs())
 		{
 			analytic.InitWebSocketRouter(w)
 			certificate.InitCertificateWebSocketRouter(w)
 			event.InitRouter(w)
-			o := w.Group("", middleware.RequireSecureSession())
+			o := w.Group("", middleware.RequireInteractiveUser(), middleware.RequireSecureSession())
 			{
 				terminal.InitRouter(o)
 			}
 			nginxLog.InitWebSocketRouter(w)
-			upstream.InitRouter(w)
+			sites.InitWebSocketRouter(w)
+			upstream.InitWebSocketRouter(w)
 			system.InitWebSocketRouter(w)
 			nginx.InitWebSocketRouter(w)
 			cluster.InitWebSocketRouter(w)

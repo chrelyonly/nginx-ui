@@ -1,26 +1,196 @@
 package nginx
 
 import (
+	"errors"
+	"io"
+	"math"
 	"net/http"
+	"strconv"
+	"sync"
+	"time"
 
+	internalconfig "github.com/0xJacky/Nginx-UI/internal/config"
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
+	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/0xJacky/Nginx-UI/query"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/uozi-tech/cosy"
 )
 
+type restartRequest struct {
+	OperationID string `json:"operation_id"`
+}
+
+type startRestartFunc func(operationID string) (*nginx.ControlOperation, error)
+
+const reloadCooldown = 2 * time.Second
+
+type reloadGate struct {
+	mutex        sync.Mutex
+	inFlight     bool
+	lastFinished time.Time
+	cooldown     time.Duration
+}
+
+type reloadDependencies struct {
+	now              func() time.Time
+	tryLockApply     func() (release func(), ok bool)
+	tryTestAndReload func() (testResult, reloadResult *nginx.ControlResult, ok bool)
+}
+
+var manualReloadGate = &reloadGate{cooldown: reloadCooldown}
+
+func defaultReloadDependencies() reloadDependencies {
+	return reloadDependencies{
+		now:              time.Now,
+		tryLockApply:     internalconfig.TryLockApply,
+		tryTestAndReload: nginx.TryTestAndReload,
+	}
+}
+
+func (gate *reloadGate) tryStart(now time.Time) (ok bool, retryAfter time.Duration) {
+	gate.mutex.Lock()
+	defer gate.mutex.Unlock()
+
+	if gate.inFlight {
+		return false, 0
+	}
+	if !gate.lastFinished.IsZero() {
+		retryAfter = gate.cooldown - now.Sub(gate.lastFinished)
+		if retryAfter > 0 {
+			return false, retryAfter
+		}
+	}
+
+	gate.inFlight = true
+	return true, 0
+}
+
+func (gate *reloadGate) finish(now time.Time, attempted bool) {
+	gate.mutex.Lock()
+	gate.inFlight = false
+	if attempted {
+		gate.lastFinished = now
+	}
+	gate.mutex.Unlock()
+}
+
+func buildNamespaceTestConfigResponse(namespaceID uint64, siteCount, streamCount int, result nginx.TestConfigResult) gin.H {
+	return gin.H{
+		"message":        result.Message,
+		"level":          result.Level,
+		"namespace_id":   namespaceID,
+		"site_count":     siteCount,
+		"stream_count":   streamCount,
+		"test_scope":     result.TestScope,
+		"sandbox_status": result.SandboxStatus,
+		"sandbox_reason": result.SandboxReason,
+		"error_category": result.ErrorCategory,
+	}
+}
+
+type namespaceTestConfigDependencies struct {
+	findNamespace   func(namespaceID uint64) (*model.Namespace, error)
+	findSitePaths   func(namespaceID uint64) ([]string, error)
+	findStreamPaths func(namespaceID uint64) ([]string, error)
+	testConfig      func(namespace *nginx.NamespaceInfo, sitePaths, streamPaths []string) nginx.TestConfigResult
+}
+
+func defaultNamespaceTestConfigDependencies() namespaceTestConfigDependencies {
+	return namespaceTestConfigDependencies{
+		findNamespace: func(namespaceID uint64) (*model.Namespace, error) {
+			ns := query.Namespace
+			return ns.Where(ns.ID.Eq(namespaceID)).First()
+		},
+		findSitePaths: func(namespaceID uint64) ([]string, error) {
+			s := query.Site
+			sites, err := s.Where(s.NamespaceID.Eq(namespaceID)).Find()
+			if err != nil {
+				return nil, err
+			}
+
+			paths := make([]string, 0, len(sites))
+			for _, site := range sites {
+				paths = append(paths, site.Path)
+			}
+			return paths, nil
+		},
+		findStreamPaths: func(namespaceID uint64) ([]string, error) {
+			st := query.Stream
+			streams, err := st.Where(st.NamespaceID.Eq(namespaceID)).Find()
+			if err != nil {
+				return nil, err
+			}
+
+			paths := make([]string, 0, len(streams))
+			for _, stream := range streams {
+				paths = append(paths, stream.Path)
+			}
+			return paths, nil
+		},
+		testConfig: nginx.SandboxTestConfigWithPaths,
+	}
+}
+
 // Reload reloads the nginx
 func Reload(c *gin.Context) {
-	nginx.Control(nginx.Reload).Resp(c)
+	reload(c, defaultReloadDependencies(), manualReloadGate)
+}
+
+func reload(c *gin.Context, dependencies reloadDependencies, gate *reloadGate) {
+	started, retryAfter := gate.tryStart(dependencies.now())
+	if !started {
+		if retryAfter > 0 {
+			seconds := int(math.Ceil(retryAfter.Seconds()))
+			c.Header("Retry-After", strconv.Itoa(seconds))
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"message":     "Nginx reload is cooling down",
+				"retry_after": seconds,
+			})
+			return
+		}
+		c.JSON(http.StatusConflict, gin.H{
+			"message": "another Nginx reload is already running",
+		})
+		return
+	}
+
+	attempted := false
+	defer func() {
+		gate.finish(dependencies.now(), attempted)
+	}()
+
+	releaseApply, ok := dependencies.tryLockApply()
+	if !ok {
+		c.JSON(http.StatusConflict, gin.H{
+			"message": "another Nginx configuration operation is already running",
+		})
+		return
+	}
+	defer releaseApply()
+
+	testResult, reloadResult, ok := dependencies.tryTestAndReload()
+	if !ok {
+		c.JSON(http.StatusConflict, gin.H{
+			"message": "another Nginx control operation is already running",
+		})
+		return
+	}
+	attempted = true
+
+	if testResult.IsError() {
+		testResult.RespError(c)
+		return
+	}
+	reloadResult.Resp(c)
 }
 
 // TestConfig tests the nginx config
 func TestConfig(c *gin.Context) {
 	lastResult := nginx.Control(nginx.TestConfig)
-	c.JSON(http.StatusOK, gin.H{
-		"message": lastResult.GetOutput(),
-		"level":   lastResult.GetLevel(),
-	})
+	result := nginx.NewTestConfigResult(lastResult.GetStdOut(), lastResult.GetStdErr(), nginx.TestScopeGlobal, "")
+	c.JSON(http.StatusOK, result)
 }
 
 // TestConfigWithNamespace tests nginx config in isolated sandbox for a specific namespace
@@ -33,15 +203,16 @@ func TestConfigWithNamespace(c *gin.Context) {
 		return
 	}
 
-	// Get namespace and related configs
+	testConfigWithNamespace(c, req.NamespaceID, defaultNamespaceTestConfigDependencies())
+}
+
+func testConfigWithNamespace(c *gin.Context, namespaceID uint64, dependencies namespaceTestConfigDependencies) {
 	var namespaceInfo *nginx.NamespaceInfo
 	var sitePaths []string
 	var streamPaths []string
 
-	if req.NamespaceID > 0 {
-		// Fetch namespace
-		ns := query.Namespace
-		namespace, err := ns.Where(ns.ID.Eq(req.NamespaceID)).First()
+	if namespaceID > 0 {
+		namespace, err := dependencies.findNamespace(namespaceID)
 		if err != nil {
 			cosy.ErrHandler(c, err)
 			return
@@ -53,48 +224,67 @@ func TestConfigWithNamespace(c *gin.Context) {
 			DeployMode: namespace.DeployMode,
 		}
 
-		// Fetch sites belonging to this namespace
-		s := query.Site
-		sites, err := s.Where(s.NamespaceID.Eq(req.NamespaceID)).Find()
-		if err == nil {
-			for _, site := range sites {
-				sitePaths = append(sitePaths, site.Path)
-			}
+		sitePaths, err = dependencies.findSitePaths(namespaceID)
+		if err != nil {
+			cosy.ErrHandler(c, err)
+			return
 		}
 
-		// Fetch streams belonging to this namespace
-		st := query.Stream
-		streams, err := st.Where(st.NamespaceID.Eq(req.NamespaceID)).Find()
-		if err == nil {
-			for _, stream := range streams {
-				streamPaths = append(streamPaths, stream.Path)
-			}
+		streamPaths, err = dependencies.findStreamPaths(namespaceID)
+		if err != nil {
+			cosy.ErrHandler(c, err)
+			return
 		}
 	}
 
-	// Use sandbox test with namespace-specific paths
-	result := nginx.Control(func() (string, error) {
-		return nginx.SandboxTestConfigWithPaths(namespaceInfo, sitePaths, streamPaths)
-	})
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":      result.GetOutput(),
-		"level":        result.GetLevel(),
-		"namespace_id": req.NamespaceID,
-	})
+	result := dependencies.testConfig(namespaceInfo, sitePaths, streamPaths)
+	c.JSON(http.StatusOK, buildNamespaceTestConfigResponse(namespaceID, len(sitePaths), len(streamPaths), result))
 }
 
 // Restart restarts the nginx
 func Restart(c *gin.Context) {
+	restart(c, nginx.StartRestart)
+}
+
+func restart(c *gin.Context, startRestart startRestartFunc) {
+	var request restartRequest
+	if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"message": "invalid restart request",
+		})
+		return
+	}
+	if request.OperationID != "" {
+		if _, err := uuid.Parse(request.OperationID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"message": "operation_id must be a valid UUID",
+			})
+			return
+		}
+	}
+
+	operation, err := startRestart(request.OperationID)
+	if err != nil {
+		if errors.Is(err, nginx.ErrControlOperationRunning) {
+			c.JSON(http.StatusConflict, gin.H{
+				"message": "another Nginx control operation is already running",
+				"control": nginx.GetControlOperation(),
+			})
+			return
+		}
+		cosy.ErrHandler(c, err)
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "ok",
+		"control": operation,
 	})
-	go nginx.Restart()
 }
 
 // Status returns the status of the nginx
 func Status(c *gin.Context) {
-	lastResult := nginx.GetLastResult()
+	lastResult, operation := nginx.GetStatusSnapshot()
 
 	running := nginx.IsRunning()
 
@@ -102,5 +292,6 @@ func Status(c *gin.Context) {
 		"running": running,
 		"message": lastResult.GetOutput(),
 		"level":   lastResult.GetLevel(),
+		"control": operation,
 	})
 }

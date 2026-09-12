@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { RecoveryCode } from '@/api/recovery'
-import { CheckCircleOutlined } from '@ant-design/icons-vue'
+import { CheckCircleOutlined } from '@antdv-next/icons'
 import { UseClipboard } from '@vueuse/components'
 import otp from '@/api/otp'
 import OTPInput from '@/components/OTPInput'
@@ -23,6 +23,7 @@ const resetting = ref(false)
 const generatedUrl = ref('')
 const secret = ref('')
 const passcode = ref('')
+const password = ref('')
 const refOtp = useTemplateRef('refOtp')
 
 function clickEnable2FA() {
@@ -34,13 +35,21 @@ function generateSecret() {
   otp.generate_secret().then(r => {
     secret.value = r.secret
     generatedUrl.value = r.url
+    password.value = ''
     refOtp.value?.clearInput()
   })
 }
 
 function enroll(code: string) {
-  otp.enroll_otp(secret.value, code).then(r => {
+  if (!password.value) {
+    message.error($gettext('Please enter your current password'))
+    refOtp.value?.clearInput()
+    return
+  }
+
+  otp.enroll_otp(secret.value, code, password.value).then(r => {
     enrolling.value = false
+    password.value = ''
     recoveryCodes.value = r.codes
     emit('refresh')
     message.success($gettext('Enable 2FA successfully'))
@@ -69,7 +78,7 @@ function reset2FA() {
     <p>{{ $gettext('TOTP is a two-factor authentication method that uses a time-based one-time password algorithm.') }}</p>
     <p>{{ $gettext('To enable it, you need to install the Google or Microsoft Authenticator app on your mobile phone.') }}</p>
     <p>{{ $gettext('Scan the QR code with your mobile phone to add the account to the app.') }}</p>
-    <AAlert v-if="!status" type="warning" :message="$gettext('Current account is not enabled TOTP.')" class="mb-2" show-icon />
+    <AAlert v-if="!status" type="warning" :title="$gettext('Current account is not enabled TOTP.')" class="mb-2" show-icon />
     <div v-else>
       <p><CheckCircleOutlined class="mr-2 text-green-600" />{{ $gettext('Current account is enabled TOTP.') }}</p>
     </div>
@@ -118,6 +127,14 @@ function reset2FA() {
         </div>
 
         <div>
+          <AForm layout="vertical">
+            <AFormItem :label="$gettext('Current Password')">
+              <AInputPassword
+                v-model:value="password"
+                autocomplete="current-password"
+              />
+            </AFormItem>
+          </AForm>
           <p>{{ $gettext('Input the code from the app:') }}</p>
           <OTPInput
             ref="refOtp"

@@ -2,8 +2,10 @@ package nginx_log
 
 import (
 	"net/http"
+	"path/filepath"
 
 	"github.com/0xJacky/Nginx-UI/internal/kernel"
+	"github.com/0xJacky/Nginx-UI/internal/nginx"
 	"github.com/0xJacky/Nginx-UI/internal/nginx_log"
 	"github.com/0xJacky/Nginx-UI/settings"
 	"github.com/gin-gonic/gin"
@@ -12,9 +14,9 @@ import (
 
 // EnableAdvancedIndexing enables advanced indexing for nginx logs
 func EnableAdvancedIndexing(c *gin.Context) {
-	settings.NginxLogSettings.IndexingEnabled = true
-
-	err := settings.Save()
+	err := settings.Update(func() {
+		settings.NginxLogSettings.IndexingEnabled = true
+	})
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return
@@ -23,8 +25,10 @@ func EnableAdvancedIndexing(c *gin.Context) {
 	// Start the nginx_log services
 	nginx_log.InitializeServices(kernel.Context)
 
-	// Migrate fallback cache entries to LogFileManager
-	nginx_log.MigrateFallbackCache()
+	// Hand the log paths already discovered from the nginx configuration to the
+	// freshly started services. InitializeServices seeds them too, but it exits
+	// early when the services happen to be running already, so sync again here.
+	nginx_log.SyncDiscoveredLogPaths()
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Advanced indexing enabled successfully",
@@ -33,9 +37,9 @@ func EnableAdvancedIndexing(c *gin.Context) {
 
 // DisableAdvancedIndexing disables advanced indexing for nginx logs
 func DisableAdvancedIndexing(c *gin.Context) {
-	settings.NginxLogSettings.IndexingEnabled = false
-
-	err := settings.Save()
+	err := settings.Update(func() {
+		settings.NginxLogSettings.IndexingEnabled = false
+	})
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return
@@ -55,5 +59,24 @@ func GetAdvancedIndexingStatus(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"enabled": enabled,
+	})
+}
+
+// GetDefaultLogDir returns the directory nginx writes its default access log
+// to. The site editor uses it to propose a per-site access_log path: a log
+// placed next to the default one is inside the log directory whitelist, so it
+// can be read and indexed without any further configuration.
+func GetDefaultLogDir(c *gin.Context) {
+	dir := ""
+	if accessLogPath := nginx.GetAccessLogPath(); accessLogPath != "" {
+		dir = filepath.Dir(accessLogPath)
+	} else if prefix := nginx.GetPrefix(); prefix != "" {
+		// nginx may not be running or may declare no access_log at all; the
+		// logs directory under the nginx prefix is whitelisted too.
+		dir = filepath.Join(prefix, "logs")
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_log_dir": dir,
 	})
 }

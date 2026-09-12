@@ -1,11 +1,12 @@
 package user
 
 import (
+	"github.com/0xJacky/Nginx-UI/internal/middleware"
 	"github.com/0xJacky/Nginx-UI/internal/user"
 	"github.com/0xJacky/Nginx-UI/model"
-	"github.com/0xJacky/Nginx-UI/query"
 	"github.com/0xJacky/Nginx-UI/settings"
 	"github.com/gin-gonic/gin"
+	"github.com/spf13/cast"
 	"github.com/uozi-tech/cosy"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -43,9 +44,15 @@ func InitManageUserRouter(g *gin.RouterGroup) {
 		})
 		c.BeforeDecodeHook(encryptPassword)
 		c.ExecutedHook(func(ctx *cosy.Ctx[model.User]) {
-			if ctx.Payload["password"] != "" {
-				a := query.AuthToken
-				_, _ = a.Where(a.UserID.Eq(ctx.ID)).Delete()
+			user.InvalidateUserCache(ctx.ID)
+
+			if ctx.Payload["password"] != nil {
+				user.DeleteUserTokens(ctx.ID)
+				return
+			}
+
+			if status, ok := ctx.Payload["status"]; ok && !cast.ToBool(status) {
+				user.DeleteUserTokens(ctx.ID)
 			}
 		})
 	})
@@ -57,6 +64,11 @@ func InitManageUserRouter(g *gin.RouterGroup) {
 			}
 		})
 	})
+
+	c.BeforeCreate(middleware.RequireSecureSession())
+	c.BeforeModify(middleware.RequireSecureSession())
+	c.BeforeDestroy(middleware.RequireSecureSession())
+	c.BeforeRecover(middleware.RequireSecureSession())
 
 	c.InitRouter(g)
 }

@@ -44,15 +44,22 @@ func GetConfigs(c *gin.Context) {
 	namespaceId := cast.ToUint64(c.Query("namespace_id"))
 
 	// Get directory parameter
-	encodedDir := c.DefaultQuery("dir", "/")
-
-	// Handle cases where the path might be encoded multiple times
-	dir := helper.UnescapeURL(encodedDir)
+	dir, encoded := helper.DecodePathParam(c.DefaultQuery("dir", "/"))
+	if !encoded {
+		// Handle cases where the path might be encoded multiple times
+		dir = helper.UnescapeURL(dir)
+	}
 
 	// Ensure the directory path format is correct
 	dir = strings.TrimSpace(dir)
 	if dir != "/" && strings.HasSuffix(dir, "/") {
 		dir = strings.TrimSuffix(dir, "/")
+	}
+
+	fullDir, err := config.ResolveConfPath(dir)
+	if err != nil {
+		cosy.ErrHandler(c, err)
+		return
 	}
 
 	// Create options
@@ -65,7 +72,7 @@ func GetConfigs(c *gin.Context) {
 	}
 
 	// Get config files from directory and create entities
-	configFiles, err := os.ReadDir(nginx.GetConfPath(dir))
+	configFiles, err := nginx.ReadDir(fullDir)
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return
@@ -82,7 +89,7 @@ func GetConfigs(c *gin.Context) {
 		// For generic config files, we don't have database records
 		// so namespaceID and namespace will be 0 and nil
 		entity := &FileEntity{
-			path:        filepath.Join(nginx.GetConfPath(dir), file.Name()),
+			path:        filepath.Join(fullDir, file.Name()),
 			namespaceID: 0,
 			namespace:   nil,
 		}

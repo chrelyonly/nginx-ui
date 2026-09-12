@@ -2,8 +2,6 @@ package config
 
 import (
 	"net/http"
-	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -39,37 +37,47 @@ func Rename(c *gin.Context) {
 
 	decodedOrigName := helper.UnescapeURL(json.OrigName)
 
-	decodedNewName, err := url.QueryUnescape(json.NewName)
+	decodedNewName := helper.UnescapeURL(json.NewName)
+
+	origFullPath, err := config.ResolveConfPath(decodedBasePath, decodedOrigName)
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return
 	}
 
-	origFullPath := nginx.GetConfPath(decodedBasePath, decodedOrigName)
-	newFullPath := nginx.GetConfPath(decodedBasePath, decodedNewName)
-	if !helper.IsUnderDirectory(origFullPath, nginx.GetConfPath()) ||
-		!helper.IsUnderDirectory(newFullPath, nginx.GetConfPath()) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"message": "you are not allowed to rename a file " +
-				"outside of the nginx config path",
-		})
-		return
-	}
-
-	stat, err := os.Stat(origFullPath)
+	newFullPath, err := config.ResolveConfPath(decodedBasePath, decodedNewName)
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return
 	}
 
-	if helper.FileExists(newFullPath) {
+	stat, err := nginx.Stat(origFullPath)
+	if err != nil {
+		cosy.ErrHandler(c, err)
+		return
+	}
+
+	if !stat.IsDir() {
+		err = config.ValidateConfigFilename(newFullPath)
+		if err != nil {
+			cosy.ErrHandler(c, err)
+			return
+		}
+	}
+
+	destinationExists, err := nginx.Exists(newFullPath)
+	if err != nil {
+		cosy.ErrHandler(c, err)
+		return
+	}
+	if destinationExists {
 		c.JSON(http.StatusNotAcceptable, gin.H{
 			"message": "target file already exists",
 		})
 		return
 	}
 
-	err = os.Rename(origFullPath, newFullPath)
+	err = nginx.Rename(origFullPath, newFullPath)
 	if err != nil {
 		cosy.ErrHandler(c, err)
 		return

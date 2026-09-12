@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import type { SelectValue } from 'ant-design-vue/es/select'
-import type { SiteStatus } from '@/api/site'
-import { Modal } from 'ant-design-vue'
+import type { SelectProps, SelectValue } from 'antdv-next'
+import type { MaintenancePayload, SiteStatus } from '@/api/site'
+import { Modal } from 'antdv-next'
 import site from '@/api/site'
 import { ConfigStatus } from '@/constants'
+import MaintenanceConfigModal from '@/views/site/components/MaintenanceConfigModal.vue'
 
 // Define props with TypeScript
 const props = defineProps<{
   siteName: string
+  status: SiteStatus
 }>()
 
 // Define event for status change notification
@@ -15,13 +17,37 @@ const emit = defineEmits<{
   statusChanged: [{ status: SiteStatus }]
 }>()
 
-// Use defineModel for v-model binding
-const status = defineModel<string>({
-  default: ConfigStatus.Disabled,
-})
-
 const { message } = useGlobalApp()
 const [modal, ContextHolder] = Modal.useModal()
+const maintenanceModalOpen = ref(false)
+const pendingMaintenanceOriginalStatus = ref<SiteStatus>(ConfigStatus.Disabled)
+const displayStatus = ref<SiteStatus>(props.status)
+const selectRenderKey = ref(0)
+
+watch(() => props.status, val => {
+  displayStatus.value = val
+  selectRenderKey.value += 1
+}, { immediate: true })
+
+function restoreDisplayStatus(statusValue: SiteStatus) {
+  displayStatus.value = statusValue
+  selectRenderKey.value += 1
+}
+
+const statusOptions = computed<SelectProps['options']>(() => [
+  {
+    value: ConfigStatus.Enabled,
+    label: $gettext('Enabled'),
+  },
+  {
+    value: ConfigStatus.Disabled,
+    label: $gettext('Disabled'),
+  },
+  {
+    value: ConfigStatus.Maintenance,
+    label: $gettext('Maintenance'),
+  },
+])
 
 // Computed property for select style based on current status
 const selectStyle = computed(() => {
@@ -45,14 +71,14 @@ const selectStyle = computed(() => {
       'color': '#ffffff',
     },
   }
-  return statusStyles[status.value] || {}
+  return statusStyles[displayStatus.value] || {}
 })
 
 // Enable the site
 function enable() {
   site.enable(props.siteName).then(() => {
     message.success($gettext('Enabled successfully'))
-    status.value = ConfigStatus.Enabled
+    restoreDisplayStatus(ConfigStatus.Enabled)
     emit('statusChanged', {
       status: ConfigStatus.Enabled,
     })
@@ -65,7 +91,7 @@ function enable() {
 function disable() {
   site.disable(props.siteName).then(() => {
     message.success($gettext('Disabled successfully'))
-    status.value = ConfigStatus.Disabled
+    restoreDisplayStatus(ConfigStatus.Disabled)
     emit('statusChanged', {
       status: ConfigStatus.Disabled,
     })
@@ -75,10 +101,10 @@ function disable() {
 }
 
 // Enable maintenance mode for the site
-function enableMaintenance() {
-  site.enableMaintenance(props.siteName).then(() => {
+function enableMaintenance(payload: MaintenancePayload) {
+  site.enableMaintenance(props.siteName, payload).then(() => {
     message.success($gettext('Maintenance mode enabled successfully'))
-    status.value = ConfigStatus.Maintenance
+    restoreDisplayStatus(ConfigStatus.Maintenance)
     emit('statusChanged', {
       status: ConfigStatus.Maintenance,
     })
@@ -91,7 +117,7 @@ function enableMaintenance() {
 function disableMaintenance() {
   site.enable(props.siteName).then(() => {
     message.success($gettext('Maintenance mode disabled successfully'))
-    status.value = ConfigStatus.Enabled
+    restoreDisplayStatus(ConfigStatus.Enabled)
     emit('statusChanged', {
       status: ConfigStatus.Enabled,
     })
@@ -102,13 +128,19 @@ function disableMaintenance() {
 
 // Handle status change from select
 function onChangeStatus(value: SelectValue) {
-  const statusValue = value as string
-  if (!statusValue || statusValue === status.value) {
+  const statusValue = value as SiteStatus
+  if (!statusValue || statusValue === displayStatus.value) {
     return
   }
 
-  // Save original status to restore if user cancels
-  const originalStatus = status.value
+  const originalStatus = displayStatus.value
+  restoreDisplayStatus(originalStatus)
+
+  if (statusValue === ConfigStatus.Maintenance) {
+    pendingMaintenanceOriginalStatus.value = originalStatus
+    maintenanceModalOpen.value = true
+    return
+  }
 
   const statusMap = {
     [ConfigStatus.Enabled]: $gettext('enable'),
@@ -124,7 +156,7 @@ function onChangeStatus(value: SelectValue) {
     cancelText: $gettext('Cancel'),
     async onOk() {
       if (statusValue === ConfigStatus.Enabled) {
-        if (status.value === ConfigStatus.Maintenance) {
+        if (displayStatus.value === ConfigStatus.Maintenance) {
           disableMaintenance()
         }
         else {
@@ -134,37 +166,67 @@ function onChangeStatus(value: SelectValue) {
       else if (statusValue === ConfigStatus.Disabled) {
         disable()
       }
-      else if (statusValue === ConfigStatus.Maintenance) {
-        enableMaintenance()
-      }
     },
     onCancel() {
-      // Restore original status if user cancels
-      status.value = originalStatus
+      restoreDisplayStatus(originalStatus)
     },
   })
+}
+
+function onMaintenanceConfirm(payload: MaintenancePayload) {
+  modal.confirm({
+    title: $gettext('Do you want to set this site to maintenance mode?'),
+    mask: false,
+    centered: true,
+    okText: $gettext('Maintenance'),
+    cancelText: $gettext('Cancel'),
+    onOk: () => enableMaintenance(payload),
+    onCancel: () => restoreDisplayStatus(pendingMaintenanceOriginalStatus.value),
+  })
+}
+
+function onMaintenanceModalOpenChange(open: boolean) {
+  maintenanceModalOpen.value = open
+  if (!open) {
+    restoreDisplayStatus(pendingMaintenanceOriginalStatus.value)
+  }
 }
 </script>
 
 <template>
   <div class="site-status-select">
     <ContextHolder />
+    <MaintenanceConfigModal
+      :open="maintenanceModalOpen"
+      :title="$gettext('Set maintenance information for this site')"
+      :ok-text="$gettext('Next')"
+      @update:open="onMaintenanceModalOpenChange"
+      @confirm="onMaintenanceConfirm"
+    />
     <ASelect
-      :value="status"
+      :key="selectRenderKey"
+      :value="displayStatus"
       class="status-select"
+      :popup-match-select-width="false"
+      :styles="{
+        popup: {
+          root: {
+            minWidth: '164px',
+          },
+        },
+      }"
+      :classes="{
+        root: 'status-select-root',
+        content: 'status-select-content',
+        suffix: 'status-select-suffix',
+        popup: {
+          listItem: 'status-select-list-item',
+        },
+      }"
       :style="selectStyle"
+      :options="statusOptions"
       @change="onChangeStatus"
-    >
-      <ASelectOption :value="ConfigStatus.Enabled">
-        {{ $gettext('Enabled') }}
-      </ASelectOption>
-      <ASelectOption :value="ConfigStatus.Disabled">
-        {{ $gettext('Disabled') }}
-      </ASelectOption>
-      <ASelectOption :value="ConfigStatus.Maintenance">
-        {{ $gettext('Maintenance') }}
-      </ASelectOption>
-    </ASelect>
+    />
   </div>
 </template>
 
@@ -173,59 +235,58 @@ function onChangeStatus(value: SelectValue) {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  max-width: 200px;
 }
 
 .status-select {
-  min-width: 120px;
+  min-width: 164px;
 }
 
-:deep(.ant-select-selector) {
+:deep(.status-select-root) {
   transition: all 0.3s ease !important;
   font-weight: 500 !important;
   border-radius: 6px !important;
 }
 
-:deep(.ant-select-selection-item) {
+:deep(.status-select-content) {
   font-weight: 500 !important;
 }
 
 /* Ensure custom background colors are applied correctly */
-:deep(.status-select .ant-select-selector) {
+:deep(.status-select-root) {
   background-color: var(--ant-select-bg) !important;
   color: var(--ant-select-color) !important;
 }
 
-:deep(.status-select .ant-select-selection-item) {
+:deep(.status-select-content) {
   color: var(--ant-select-color) !important;
 }
 
-:deep(.status-select .ant-select-arrow) {
+:deep(.status-select-suffix) {
   color: var(--ant-select-color) !important;
 }
 
 /* Override focus and hover styles to maintain custom colors */
-:deep(.ant-select:not(.ant-select-disabled):hover .ant-select-selector) {
+:deep(.status-select-root:not(.ant-select-disabled):hover) {
   border-color: var(--ant-select-border) !important;
   background-color: var(--ant-select-bg) !important;
 }
 
-:deep(.ant-select-focused .ant-select-selector) {
+:deep(.status-select-root.ant-select-focused) {
   border-color: var(--ant-select-border) !important;
   background-color: var(--ant-select-bg) !important;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.1) !important;
 }
 
 /* Make sure dropdown options also have appropriate styling */
-:deep(.ant-select-dropdown .ant-select-item-option) {
+:deep(.ant-select-dropdown .status-select-list-item) {
   padding: 8px 12px !important;
 }
 
-:deep(.ant-select-dropdown .ant-select-item-option:hover) {
+:deep(.ant-select-dropdown .status-select-list-item:hover) {
   background-color: rgba(0, 0, 0, 0.04) !important;
 }
 
-:deep(.ant-select-dropdown .ant-select-item-option-selected) {
+:deep(.ant-select-dropdown .status-select-list-item.ant-select-item-option-selected) {
   background-color: rgba(24, 144, 255, 0.1) !important;
   font-weight: 600 !important;
 }

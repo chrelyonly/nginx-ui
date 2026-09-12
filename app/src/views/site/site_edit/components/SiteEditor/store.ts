@@ -1,4 +1,5 @@
 import type { CertificateInfo } from '@/api/cert'
+import type { NgxConfig, NgxServer } from '@/api/ngx'
 import type { Site } from '@/api/site'
 import type { CosyError } from '@/lib/http/types'
 import type { CheckedType } from '@/types'
@@ -7,6 +8,30 @@ import ngx from '@/api/ngx'
 import site from '@/api/site'
 import { useNgxConfigStore } from '@/components/NgxConfigEditor'
 import { translateError } from '@/lib/http/error'
+import { isIPAddress, splitCertificateIdentifiers } from '@/utils/certificate'
+
+interface SaveOptions {
+  omitIncompleteTLSServers?: boolean
+  syncResponse?: boolean
+}
+
+interface TLSServerIssue {
+  serverIndex: number
+  missingCertificate: boolean
+  missingCertificateKey: boolean
+}
+
+function cloneNgxConfig(config: NgxConfig): NgxConfig {
+  return JSON.parse(JSON.stringify(config))
+}
+
+function hasSSLListen(server?: NgxServer) {
+  return server?.directives?.some(v => v.directive === 'listen' && v.params?.includes('ssl')) ?? false
+}
+
+function hasDirectiveWithValue(server: NgxServer | undefined, directive: string) {
+  return server?.directives?.some(v => v.directive === directive && v.params?.trim()) ?? false
+}
 
 export const useSiteEditorStore = defineStore('siteEditor', () => {
   const advanceMode = ref(false)
@@ -20,6 +45,8 @@ export const useSiteEditorStore = defineStore('siteEditor', () => {
   const filename = ref('')
   const filepath = ref('')
   const issuingCert = ref(false)
+  const dnsLinked = ref(false) // Track if DNS is linked
+  const linkedDNSName = ref('') // Store linked DNS name
 
   const ngxConfigStore = useNgxConfigStore()
   const { ngxConfig, configText, curServerIdx, curServer, curServerDirectives, curDirectivesMap } = storeToRefs(ngxConfigStore)
@@ -54,18 +81,66 @@ export const useSiteEditorStore = defineStore('siteEditor', () => {
     loading.value = false
   }
 
-  async function buildConfig() {
-    return ngx.build_config(ngxConfig.value).then(r => {
-      configText.value = r.content
+  function getTLSServerIssues(config: NgxConfig = ngxConfig.value): TLSServerIssue[] {
+    return (config.servers ?? []).reduce<TLSServerIssue[]>((issues, server, serverIndex) => {
+      if (!hasSSLListen(server))
+        return issues
+
+      const missingCertificate = !hasDirectiveWithValue(server, 'ssl_certificate')
+      const missingCertificateKey = !hasDirectiveWithValue(server, 'ssl_certificate_key')
+
+      if (missingCertificate || missingCertificateKey) {
+        issues.push({
+          serverIndex,
+          missingCertificate,
+          missingCertificateKey,
+        })
+      }
+
+      return issues
+    }, [])
+  }
+
+  function getConfigWithoutIncompleteTLSServers(config: NgxConfig = ngxConfig.value) {
+    const clonedConfig = cloneNgxConfig(config)
+
+    const servers = clonedConfig.servers?.filter(server => {
+      if (!hasSSLListen(server))
+        return true
+
+      return hasDirectiveWithValue(server, 'ssl_certificate')
+        && hasDirectiveWithValue(server, 'ssl_certificate_key')
+    }) ?? []
+
+    if (servers.length === 0)
+      return clonedConfig
+
+    clonedConfig.servers = servers
+
+    return clonedConfig
+  }
+
+  async function buildConfig(config: NgxConfig = ngxConfig.value, syncConfigText = true) {
+    return ngx.build_config(config).then(r => {
+      if (syncConfigText)
+        configText.value = r.content
+
+      return r.content
     })
   }
 
-  async function save() {
+  async function save(options: SaveOptions = {}) {
     saving.value = true
 
     try {
+      let content = configText.value
+
       if (!advanceMode.value) {
-        await buildConfig()
+        const configForSave = options.omitIncompleteTLSServers
+          ? getConfigWithoutIncompleteTLSServers()
+          : ngxConfig.value
+
+        content = await buildConfig(configForSave, !options.omitIncompleteTLSServers)
       }
 
       if (data.value.sync_node_ids === null) {
@@ -78,17 +153,27 @@ export const useSiteEditorStore = defineStore('siteEditor', () => {
       }
 
       const response = await site.updateItem(encodeURIComponent(name.value), {
-        content: configText.value,
+        content,
+        description: data.value.description,
         overwrite: true,
         namespace_id: data.value.namespace_id,
         sync_node_ids: data.value.sync_node_ids,
         post_action: 'reload_nginx',
+        dns_domain_id: data.value.dns_domain_id,
+        dns_records: data.value.dns_records,
+        dns_record_id: data.value.dns_record_id,
+        dns_record_name: data.value.dns_record_name,
+        dns_record_type: data.value.dns_record_type,
       })
 
-      handleResponse(response)
+      if (options.syncResponse !== false)
+        await handleResponse(response)
+
+      return response
     }
     catch (error) {
-      handleParseError(error as CosyError)
+      await handleParseError(error as CosyError)
+      throw error
     }
     finally {
       saving.value = false
@@ -175,39 +260,24 @@ export const useSiteEditorStore = defineStore('siteEditor', () => {
     return false
   })
 
-  const hasWildcardServerName = computed(() => {
-    if (curDirectivesMap.value.server_name) {
-      for (const v of curDirectivesMap.value.server_name) {
-        const params = v?.params || ''
-        if (params.includes('_'))
-          return true
-      }
-    }
+  const rawServerNames = computed(() => curDirectivesMap.value.server_name
+    ?.flatMap(directive => directive.params?.split(/\s+/) ?? [])
+    .map(value => value.trim())
+    .filter(Boolean) ?? [])
 
-    return false
-  })
+  const certificateIdentifiers = computed(() => splitCertificateIdentifiers(rawServerNames.value))
 
-  const hasExplicitIpAddress = computed(() => {
-    if (curDirectivesMap.value.server_name) {
-      for (const v of curDirectivesMap.value.server_name) {
-        const params = v?.params || ''
-        // Check for IPv4 or IPv6 addresses
-        const ipv4Regex = /\b(?:\d{1,3}\.){3}\d{1,3}\b/
-        const ipv6Regex = /\[?(?:[\da-f]{0,4}:){1,7}[\da-f]{0,4}\]?/i
-        if (ipv4Regex.test(params) || ipv6Regex.test(params))
-          return true
-      }
-    }
+  const hasWildcardServerName = computed(() => rawServerNames.value.includes('_'))
 
-    return false
-  })
+  const hasExplicitIpAddress = computed(() => certificateIdentifiers.value.some(isIPAddress))
 
   const isIpCertificate = computed(() => {
-    return isDefaultServer.value || hasWildcardServerName.value
+    return hasExplicitIpAddress.value
   })
 
   const needsManualIpInput = computed(() => {
-    return isIpCertificate.value && !hasExplicitIpAddress.value
+    return (isDefaultServer.value || hasWildcardServerName.value)
+      && certificateIdentifiers.value.length === 0
   })
 
   return {
@@ -233,9 +303,15 @@ export const useSiteEditorStore = defineStore('siteEditor', () => {
     isDefaultServer,
     hasWildcardServerName,
     hasExplicitIpAddress,
+    certificateIdentifiers,
     isIpCertificate,
     needsManualIpInput,
     hasServers,
+    getTLSServerIssues,
+    getConfigWithoutIncompleteTLSServers,
+    buildConfig,
+    dnsLinked,
+    linkedDNSName,
     init,
     save,
     handleModeChange,

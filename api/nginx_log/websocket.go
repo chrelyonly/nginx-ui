@@ -1,13 +1,15 @@
 package nginx_log
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
-	"net/http"
 	"os"
 	"runtime"
+	"time"
 
 	"github.com/0xJacky/Nginx-UI/internal/helper"
+	"github.com/0xJacky/Nginx-UI/internal/middleware"
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
 	"github.com/0xJacky/Nginx-UI/internal/nginx_log"
 	"github.com/0xJacky/Nginx-UI/internal/nginx_log/utils"
@@ -64,7 +66,7 @@ func getLogPath(control *controlStruct) (logPath string, err error) {
 }
 
 // tailNginxLog tails the specified log file and sends each line to the websocket
-func tailNginxLog(ws *websocket.Conn, controlChan chan controlStruct, errChan chan error) {
+func tailNginxLog(writer *helper.SafeWebSocketWriter, controlChan chan controlStruct, errChan chan error) {
 	defer func() {
 		if err := recover(); err != nil {
 			buf := make([]byte, 1024)
@@ -74,6 +76,19 @@ func tailNginxLog(ws *websocket.Conn, controlChan chan controlStruct, errChan ch
 		}
 	}()
 
+	usesSFTP, err := nginx.UsesSFTPTarget()
+	if err != nil {
+		errChan <- err
+		return
+	}
+	if usesSFTP {
+		tailSFTPNginxLog(writer, controlChan, errChan)
+		return
+	}
+	tailLocalNginxLog(writer, controlChan, errChan)
+}
+
+func tailLocalNginxLog(writer *helper.SafeWebSocketWriter, controlChan chan controlStruct, errChan chan error) {
 	control := <-controlChan
 
 	for {
@@ -89,7 +104,7 @@ func tailNginxLog(ws *websocket.Conn, controlChan chan controlStruct, errChan ch
 			Whence: io.SeekEnd,
 		}
 
-		stat, err := os.Stat(logPath)
+		stat, err := nginx.Stat(logPath)
 		if os.IsNotExist(err) {
 			errChan <- cosy.WrapErrorWithParams(nginx_log.ErrLogFileNotExists, logPath)
 			return
@@ -117,7 +132,7 @@ func tailNginxLog(ws *websocket.Conn, controlChan chan controlStruct, errChan ch
 					continue
 				}
 
-				err = ws.WriteMessage(websocket.TextMessage, []byte(line.Text))
+				err = writer.WriteMessage(websocket.TextMessage, []byte(line.Text))
 				if err != nil {
 					if helper.IsUnexpectedWebsocketError(err) {
 						errChan <- errors.Wrap(err, "error tailNginxLog write message")
@@ -132,6 +147,101 @@ func tailNginxLog(ws *websocket.Conn, controlChan chan controlStruct, errChan ch
 				break
 			}
 		}
+	}
+}
+
+func tailSFTPNginxLog(writer *helper.SafeWebSocketWriter, controlChan chan controlStruct, errChan chan error) {
+	control := <-controlChan
+
+	for {
+		logPath, err := getLogPath(&control)
+		if err != nil {
+			errChan <- err
+			return
+		}
+
+		stat, err := nginx.Stat(logPath)
+		if os.IsNotExist(err) {
+			errChan <- cosy.WrapErrorWithParams(nginx_log.ErrLogFileNotExists, logPath)
+			return
+		}
+		if err != nil {
+			errChan <- err
+			return
+		}
+		if !stat.Mode().IsRegular() {
+			errChan <- cosy.WrapErrorWithParams(nginx_log.ErrLogFileNotRegular, logPath)
+			return
+		}
+
+		file, err := nginx.Open(logPath)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		offset := stat.Size()
+		var pending []byte
+		ticker := time.NewTicker(500 * time.Millisecond)
+		next := false
+
+		for !next {
+			select {
+			case control = <-controlChan:
+				next = true
+			case <-ticker.C:
+				current, statErr := nginx.Stat(logPath)
+				if statErr != nil {
+					ticker.Stop()
+					_ = file.Close()
+					errChan <- statErr
+					return
+				}
+				if current.Size() < offset {
+					_ = file.Close()
+					file, err = nginx.Open(logPath)
+					if err != nil {
+						ticker.Stop()
+						errChan <- err
+						return
+					}
+					offset = 0
+					pending = nil
+				}
+				if current.Size() == offset {
+					continue
+				}
+				if _, err = file.Seek(offset, io.SeekStart); err != nil {
+					ticker.Stop()
+					_ = file.Close()
+					errChan <- err
+					return
+				}
+				chunk, readErr := io.ReadAll(io.LimitReader(file, current.Size()-offset))
+				if readErr != nil {
+					ticker.Stop()
+					_ = file.Close()
+					errChan <- readErr
+					return
+				}
+				offset += int64(len(chunk))
+				pending = append(pending, chunk...)
+				lines := bytes.Split(pending, []byte{'\n'})
+				pending = append(pending[:0], lines[len(lines)-1]...)
+				for _, line := range lines[:len(lines)-1] {
+					if err = writer.WriteMessage(websocket.TextMessage, line); err != nil {
+						ticker.Stop()
+						_ = file.Close()
+						if helper.IsUnexpectedWebsocketError(err) {
+							errChan <- errors.Wrap(err, "error tailSFTPNginxLog write message")
+						}
+						return
+					}
+				}
+			}
+		}
+
+		ticker.Stop()
+		_ = file.Close()
 	}
 }
 
@@ -171,9 +281,7 @@ func handleLogControl(ws *websocket.Conn, controlChan chan controlStruct, errCha
 // Log handles websocket connection for real-time log viewing
 func Log(c *gin.Context) {
 	var upGrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
+		CheckOrigin: middleware.CheckWebSocketOrigin,
 	}
 	// upgrade http to websocket
 	ws, err := upGrader.Upgrade(c.Writer, c.Request, nil)
@@ -184,15 +292,17 @@ func Log(c *gin.Context) {
 
 	defer ws.Close()
 
+	wsWriter := helper.NewSafeWebSocketWriter(ws)
+
 	errChan := make(chan error, 1)
 	controlChan := make(chan controlStruct, 1)
 
-	go tailNginxLog(ws, controlChan, errChan)
+	go tailNginxLog(wsWriter, controlChan, errChan)
 	go handleLogControl(ws, controlChan, errChan)
 
 	if err = <-errChan; err != nil {
 		logger.Error(err)
-		_ = ws.WriteMessage(websocket.TextMessage, []byte(err.Error()))
+		_ = wsWriter.WriteMessage(websocket.TextMessage, []byte(err.Error()))
 		return
 	}
 }

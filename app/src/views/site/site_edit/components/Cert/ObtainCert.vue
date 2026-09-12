@@ -2,11 +2,13 @@
 import type { AutoCertOptions } from '@/api/auto_cert'
 import type { CertificateResult } from '@/api/cert'
 import type { PrivateKeyType } from '@/constants'
-import { Modal } from 'ant-design-vue'
+import { Modal } from 'antdv-next'
 import { AutoCertChallengeMethod } from '@/api/auto_cert'
 import site from '@/api/site'
 import AutoCertStepOne from '@/components/AutoCertForm'
 import { PrivateKeyTypeEnum } from '@/constants'
+import { isIPAddress } from '@/utils/certificate'
+import { useTLSDirectives } from '../../composables/useTLSDirectives'
 import { useSiteEditorStore } from '../SiteEditor/store'
 import ObtainCertLive from './ObtainCertLive.vue'
 
@@ -17,7 +19,7 @@ const props = defineProps<{
 
 const editorStore = useSiteEditorStore()
 const { message } = useGlobalApp()
-const { ngxConfig, issuingCert, curServerDirectives, curDirectivesMap, isDefaultServer, hasWildcardServerName, hasExplicitIpAddress, isIpCertificate, needsManualIpInput } = storeToRefs(editorStore)
+const { ngxConfig, issuingCert, curDirectivesMap, isDefaultServer, hasWildcardServerName, certificateIdentifiers, needsManualIpInput } = storeToRefs(editorStore)
 
 const autoCert = defineModel<boolean>('autoCert')
 
@@ -27,6 +29,7 @@ const step = ref(1)
 const [modal, ContextHolder] = Modal.useModal()
 
 const data = ref({
+  domains: [],
   dns_credential_id: null,
   challenge_method: AutoCertChallengeMethod.http01,
   code: '',
@@ -45,18 +48,44 @@ const name = computed(() => {
 
 const refObtainCertLive = useTemplateRef('refObtainCertLive')
 const refAutoCertForm = useTemplateRef('refAutoCertForm')
+const manualIpAddress = ref('')
+
+const requestIdentifiers = computed(() => {
+  if (needsManualIpInput.value) {
+    const manualIdentifier = manualIpAddress.value.trim()
+    return manualIdentifier ? [manualIdentifier] : []
+  }
+
+  return [...certificateIdentifiers.value]
+})
+
+const isIpCertificate = computed(() => requestIdentifiers.value.some(isIPAddress))
+
+const { ensureTLSDirectives } = useTLSDirectives()
 
 function issueCert() {
-  refObtainCertLive.value?.issue_cert(
+  const live = refObtainCertLive.value
+  if (!live) {
+    modalClosable.value = true
+    issuingCert.value = false
+    message.error($gettext('Certificate issuance component is not ready'))
+    return
+  }
+
+  live.issue_cert(
     props.configName,
-    name.value.trim().split(' '),
+    data.value.domains,
     data.value.key_type,
-  ).then(resolveCert)
+  ).then(resolveCert).catch(() => {
+    // The live log already shows the issuance failure details.
+    modalClosable.value = true
+    issuingCert.value = false
+  })
 }
 
-async function resolveCert({ ssl_certificate, ssl_certificate_key, key_type }: CertificateResult) {
-  curDirectivesMap.value.ssl_certificate[0].params = ssl_certificate
-  curDirectivesMap.value.ssl_certificate_key[0].params = ssl_certificate_key
+async function resolveCert({ ssl_certificate, ssl_certificate_key, key_type, profile }: CertificateResult) {
+  data.value.profile = profile
+  ensureTLSDirectives(ssl_certificate, ssl_certificate_key)
   await editorStore.save()
   changeAutoCert(true, key_type)
   autoCert.value = true
@@ -65,10 +94,17 @@ async function resolveCert({ ssl_certificate, ssl_certificate_key, key_type }: C
 function changeAutoCert(status: boolean, key_type?: PrivateKeyType) {
   if (status) {
     site.add_auto_cert(props.configName, {
-      domains: name.value.trim().split(' '),
+      domains: data.value.domains,
       challenge_method: data.value.challenge_method!,
+      profile: data.value.profile,
       dns_credential_id: data.value.dns_credential_id!,
       key_type: key_type!,
+      acme_user_id: data.value.acme_user_id,
+      must_staple: data.value.must_staple,
+      lego_disable_cname_support: data.value.lego_disable_cname_support,
+      disable_authoritative_ns_propagation: data.value.disable_authoritative_ns_propagation,
+      enable_common_name: data.value.enable_common_name,
+      revoke_old: data.value.revoke_old,
     }).then(() => {
       message.success($gettext('Auto-renewal enabled for %{name}', { name: name.value }))
     }).catch(e => {
@@ -92,7 +128,10 @@ async function onchange(status: boolean) {
     ngxConfig.value.servers.forEach(v => {
       v.locations = v?.locations?.filter(l => l.path !== '/.well-known/acme-challenge')
     })
-    await editorStore.save()
+    // Skip syncing the response so handleResponse() does not overwrite
+    // our local autoCert back to the backend's still-enabled state, which
+    // would leave the switch showing on until a page reload.
+    await editorStore.save({ syncResponse: false })
     changeAutoCert(status)
   }
 
@@ -110,28 +149,10 @@ async function job() {
     return
   }
 
-  const serverNameIdx = curDirectivesMap.value.server_name[0]?.idx ?? 0
-
-  if (!curServerDirectives.value)
-    curServerDirectives.value = []
-
-  if (!curDirectivesMap.value.ssl_certificate) {
-    curServerDirectives.value.splice(serverNameIdx + 1, 0, {
-      directive: 'ssl_certificate',
-      params: '',
-    })
-  }
-
+  // Wait for Vue to mount ObtainCertLive after step transitions to 2; without
+  // this tick refObtainCertLive.value is still null and issueCert() silently
+  // no-ops via its optional-chain call.
   await nextTick()
-
-  if (!curDirectivesMap.value.ssl_certificate_key) {
-    const sslCertificateIdx = curDirectivesMap.value.ssl_certificate[0]?.idx ?? 0
-
-    curServerDirectives.value.splice(sslCertificateIdx + 1, 0, {
-      directive: 'ssl_certificate_key',
-      params: '',
-    })
-  }
 
   issueCert()
 }
@@ -151,6 +172,9 @@ function toggle(status: boolean) {
     })
   }
   else {
+    step.value = 1
+    manualIpAddress.value = ''
+    data.value.domains = [...certificateIdentifiers.value]
     modalVisible.value = true
     modalClosable.value = true
   }
@@ -164,19 +188,31 @@ const canNext = computed(() => {
   if (step.value === 2) {
     return false
   }
+  else if (requestIdentifiers.value.length === 0) {
+    return false
+  }
+  else if (needsManualIpInput.value && !isIPAddress(manualIpAddress.value)) {
+    return false
+  }
   else if (data.value.challenge_method === AutoCertChallengeMethod.http01) {
     return true
   }
   else if (data.value.challenge_method === AutoCertChallengeMethod.dns01) {
-    return data.value?.code ?? false
+    return Boolean(data.value.dns_credential_id)
   }
   return false
 })
 
-function next() {
-  // Apply manual IP address to domains before proceeding
-  refAutoCertForm.value?.applyManualIpToDomains()
+async function next() {
+  try {
+    await refAutoCertForm.value?.validateManualIpAddress()
+  }
+  catch (error) {
+    message.error(error instanceof Error ? error.message : String(error))
+    return
+  }
 
+  data.value.domains = [...requestIdentifiers.value]
   step.value++
   onchange(true)
 }
@@ -198,10 +234,10 @@ function next() {
         <AutoCertStepOne
           ref="refAutoCertForm"
           v-model:options="data"
+          v-model:manual-ip-address="manualIpAddress"
           :no-server-name="noServerName"
           :is-default-server="isDefaultServer"
           :has-wildcard-server-name="hasWildcardServerName"
-          :has-explicit-ip-address="hasExplicitIpAddress"
           :is-ip-certificate="isIpCertificate"
           :needs-manual-ip-input="needsManualIpInput"
         />

@@ -119,6 +119,20 @@ var selfCheckTasks = []*Task{
 var selfCheckTaskMap = orderedmap.NewOrderedMap[string, *Task]()
 
 func Init() {
+	// nginx lives outside this container in both external container and SSH
+	// mode, so both need the shared configuration directory proven, unless
+	// SSH mode reaches the files over SFTP and no shared directory exists.
+	if needsSharedConfigCheck(settings.NginxSettings) {
+		selfCheckTasks = append(selfCheckTasks, &Task{
+			Key:  "Docker-ExternalNginxConfig-Shared",
+			Name: translation.C("External Nginx configuration directory is shared"),
+			Description: translation.C("Check if Nginx UI can write a temporary file to the configured Nginx directory " +
+				"and the external Nginx container can see it at the same path. Docker socket access and ContainerName only route " +
+				"control commands; configuration and log directories must be mounted into both containers at matching paths."),
+			CheckFunc: CheckExternalContainerConfigShared,
+		})
+	}
+
 	if nginx.IsModuleLoaded(nginx.ModuleStream) {
 		selfCheckTasks = append(selfCheckTasks, &Task{
 			Key:  "Directory-Streams",
@@ -150,6 +164,20 @@ func Init() {
 				"during OTA upgrades of Nginx UI to ensure container dependencies are also upgraded. " +
 				"If you don't need this feature, please add the environment variable NGINX_UI_IGNORE_DOCKER_SOCKET=true to the container."),
 			CheckFunc: CheckDockerSocket,
+		})
+	}
+
+	if helper.ShouldManageBundledNginx() {
+		selfCheckTasks = append(selfCheckTasks, &Task{
+			Key:  "Docker-BundledNginxUIConf-WS",
+			Name: translation.C("Bundled nginx-ui.conf has WebSocket reverse-proxy fix"),
+			Description: translation.C(
+				"When the container is behind an outer reverse proxy that terminates TLS " +
+					"(e.g. host nginx, Cloudflare), the bundled conf.d/nginx-ui.conf must trust " +
+					"the inbound X-Forwarded-Proto/Host headers; otherwise WebSocket origin checks fail. " +
+					"Older deployments that persisted /etc/nginx may still have the unfixed version."),
+			CheckFunc: CheckBundledNginxUIConf,
+			FixFunc:   FixBundledNginxUIConf,
 		})
 	}
 

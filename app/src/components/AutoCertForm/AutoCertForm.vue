@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import type { SelectProps } from 'antdv-next'
 import type { AutoCertOptions } from '@/api/auto_cert'
 import { AutoCertChallengeMethod } from '@/api/auto_cert'
 import { PrivateKeyTypeEnum, PrivateKeyTypeList } from '@/constants'
+import { isIPAddress } from '@/utils/certificate'
 import ACMEUserSelector from '@/views/certificate/components/ACMEUserSelector.vue'
 import DNSChallenge from './DNSChallenge.vue'
 
@@ -11,31 +13,33 @@ const props = defineProps<{
   keyTypeReadOnly?: boolean
   isDefaultServer?: boolean
   hasWildcardServerName?: boolean
-  hasExplicitIpAddress?: boolean
   isIpCertificate?: boolean
   needsManualIpInput?: boolean
 }>()
 
 const data = defineModel<AutoCertOptions>('options', {
-  default: reactive({}),
   required: true,
 })
 
-// Local IP address buffer for manual input
-const manualIpAddress = ref('')
+const manualIpAddress = defineModel<string>('manualIpAddress', { default: '' })
 
-// Function to apply manual IP to domains when needed
-function applyManualIpToDomains() {
-  if (props.needsManualIpInput && manualIpAddress.value?.trim()) {
-    if (!data.value.domains)
-      data.value.domains = []
+const challengeMethodOptions = computed<SelectProps['options']>(() => [
+  {
+    value: AutoCertChallengeMethod.http01,
+    label: $gettext('HTTP01'),
+  },
+  {
+    value: AutoCertChallengeMethod.dns01,
+    disabled: props.isIpCertificate || props.needsManualIpInput,
+    label: $gettext('DNS01'),
+  },
+])
 
-    const trimmedIp = manualIpAddress.value.trim()
-    if (!data.value.domains.includes(trimmedIp)) {
-      data.value.domains.push(trimmedIp)
-    }
-  }
-}
+const keyTypeOptions: SelectProps['options'] = PrivateKeyTypeList.map(t => ({
+  key: t.key,
+  value: t.key,
+  label: t.name,
+}))
 
 onMounted(() => {
   if (!data.value.key_type)
@@ -43,7 +47,7 @@ onMounted(() => {
 
   if (props.forceDnsChallenge)
     data.value.challenge_method = AutoCertChallengeMethod.dns01
-  else if (props.isIpCertificate)
+  else if (props.isIpCertificate || props.needsManualIpInput)
     data.value.challenge_method = AutoCertChallengeMethod.http01
 })
 
@@ -52,27 +56,10 @@ watch(() => props.forceDnsChallenge, v => {
     data.value.challenge_method = AutoCertChallengeMethod.dns01
 })
 
-watch(() => props.isIpCertificate, v => {
-  if (v && !props.forceDnsChallenge)
+watch(() => [props.isIpCertificate, props.needsManualIpInput], ([isIpCertificate, needsManualIpInput]) => {
+  if ((isIpCertificate || needsManualIpInput) && !props.forceDnsChallenge)
     data.value.challenge_method = AutoCertChallengeMethod.http01
 })
-
-// Expose function for parent component to call before submission
-defineExpose({
-  applyManualIpToDomains,
-})
-
-// Check if IPv4 address is private
-function isPrivateIPv4(ip: string): boolean {
-  const parts = ip.split('.').map(part => Number.parseInt(part, 10))
-  const [a, b] = parts
-
-  // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8 (localhost)
-  return a === 10
-    || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168)
-    || a === 127
-}
 
 // IP address validation function
 function validateIpAddress(_rule: unknown, value: string) {
@@ -80,47 +67,32 @@ function validateIpAddress(_rule: unknown, value: string) {
     return Promise.reject($gettext('Please enter the server IP address'))
   }
 
-  // Basic IPv4 validation (simplified)
-  const ipv4Regex = /^(?:\d{1,3}\.){3}\d{1,3}$/
-  // Basic IPv6 validation
-  const ipv6Regex = /^(?:[\da-f]{1,4}:){7}[\da-f]{1,4}$|^::1$|^::$/i
-
   const trimmedValue = value.trim()
-
-  // Additional validation for IPv4 ranges
-  if (ipv4Regex.test(trimmedValue)) {
-    const parts = trimmedValue.split('.')
-    const validRange = parts.every(part => {
-      const num = Number.parseInt(part, 10)
-      return num >= 0 && num <= 255
-    })
-    if (!validRange) {
-      return Promise.reject($gettext('Please enter a valid IPv4 address (0-255 per octet)'))
-    }
-
-    // Warn about private IP addresses
-    if (isPrivateIPv4(trimmedValue)) {
-      return Promise.reject($gettext('Warning: This appears to be a private IP address. '
-        + 'Public CAs like Let\'s Encrypt cannot issue certificates for private IPs. '
-        + 'Use a public IP address or consider using a private CA.'))
-    }
-  }
-  else if (!ipv6Regex.test(trimmedValue)) {
+  if (!isIPAddress(trimmedValue)) {
     return Promise.reject($gettext('Please enter a valid IPv4 or IPv6 address'))
   }
 
   return Promise.resolve()
 }
+
+async function validateManualIpAddress() {
+  if (props.needsManualIpInput)
+    await validateIpAddress(undefined, manualIpAddress.value)
+}
+
+defineExpose({
+  validateManualIpAddress,
+})
 </script>
 
 <template>
   <div>
     <!-- IP Certificate Warning -->
     <AAlert
-      v-if="isIpCertificate && !hideNote"
+      v-if="(isIpCertificate || needsManualIpInput) && !hideNote"
       type="warning"
       show-icon
-      :message="$gettext('IP Certificate Notice')"
+      :title="$gettext('IP Certificate Notice')"
       class="mb-4"
     >
       <template #description>
@@ -144,10 +116,10 @@ function validateIpAddress(_rule: unknown, value: string) {
     </AAlert>
 
     <AAlert
-      v-if="!hideNote && !isIpCertificate"
+      v-if="!hideNote && !isIpCertificate && !needsManualIpInput"
       type="info"
       show-icon
-      :message="$gettext('Note')"
+      :title="$gettext('Note')"
       class="mb-4"
     >
       <template #description>
@@ -157,8 +129,7 @@ function validateIpAddress(_rule: unknown, value: string) {
             + 'multiple domains.') }}
         </p>
         <p>
-          {{ $gettext('The certificate for the domain will be checked 30 minutes, '
-            + 'and will be renewed if it has been more than 1 week or the period you set in settings since it was last issued.') }}
+          {{ $gettext('The certificate for the domain is checked every 30 minutes and renewed when its remaining validity reaches the threshold configured in settings.') }}
         </p>
         <p v-if="data.challenge_method === 'http01'">
           {{ $gettext('Make sure you have configured a reverse proxy for .well-known '
@@ -171,10 +142,11 @@ function validateIpAddress(_rule: unknown, value: string) {
         </p>
       </template>
     </AAlert>
-    <AForm layout="vertical">
+    <AForm layout="vertical" :model="{ manualIpAddress }">
       <!-- IP Address Input for IP certificates without explicit IP -->
       <AFormItem
         v-if="needsManualIpInput"
+        name="manualIpAddress"
         :label="$gettext('Server IP Address')"
         :rules="[{ validator: validateIpAddress, trigger: 'blur' }]"
       >
@@ -217,19 +189,28 @@ function validateIpAddress(_rule: unknown, value: string) {
         v-if="!forceDnsChallenge"
         :label="$gettext('Challenge Method')"
       >
-        <ASelect v-model:value="data.challenge_method">
-          <ASelectOption value="http01">
-            {{ $gettext('HTTP01') }}
-          </ASelectOption>
-          <ASelectOption
-            value="dns01"
-            :disabled="isIpCertificate"
-          >
-            {{ $gettext('DNS01') }}
-            <span v-if="isIpCertificate" class="text-gray-400 ml-2">
+        <ASelect
+          v-model:value="data.challenge_method"
+          :options="challengeMethodOptions"
+        >
+          <template #optionRender="{ option }">
+            {{ option.data.label }}
+            <span
+              v-if="option.data.value === AutoCertChallengeMethod.dns01 && (isIpCertificate || needsManualIpInput)"
+              class="text-gray-400 ml-2"
+            >
               ({{ $gettext('Not supported for IP certificates') }})
             </span>
-          </ASelectOption>
+          </template>
+          <template #labelRender="{ label, value }">
+            {{ label }}
+            <span
+              v-if="value === AutoCertChallengeMethod.dns01 && (isIpCertificate || needsManualIpInput)"
+              class="text-gray-400 ml-2"
+            >
+              ({{ $gettext('Not supported for IP certificates') }})
+            </span>
+          </template>
         </ASelect>
       </AFormItem>
       <AFormItem
@@ -238,15 +219,8 @@ function validateIpAddress(_rule: unknown, value: string) {
         <ASelect
           v-model:value="data.key_type"
           :disabled="keyTypeReadOnly"
-        >
-          <ASelectOption
-            v-for="t in PrivateKeyTypeList"
-            :key="t.key"
-            :value="t.key"
-          >
-            {{ t.name }}
-          </ASelectOption>
-        </ASelect>
+          :options="keyTypeOptions"
+        />
       </AFormItem>
     </AForm>
     <ACMEUserSelector v-model:options="data" />
@@ -273,6 +247,26 @@ function validateIpAddress(_rule: unknown, value: string) {
           </p>
         </template>
         <ASwitch v-model:checked="data.lego_disable_cname_support" />
+      </AFormItem>
+      <AFormItem
+        v-if="data.challenge_method === 'dns01'"
+        :label="$gettext('Disable Authoritative DNS Propagation Check')"
+      >
+        <template #help>
+          <p>
+            {{ $gettext('Skip local DNS propagation checks and wait 60 seconds before asking '
+              + 'the certificate authority to validate the record.') }}
+          </p>
+        </template>
+        <ASwitch v-model:checked="data.disable_authoritative_ns_propagation" />
+      </AFormItem>
+      <AFormItem :label="$gettext('Enable Common Name')">
+        <template #help>
+          <p>
+            {{ $gettext('Enable the certificate Common Name field for private CAs that still require it.') }}
+          </p>
+        </template>
+        <ASwitch v-model:checked="data.enable_common_name" />
       </AFormItem>
       <AFormItem :label="$gettext('Revoke Old Certificate')">
         <template #help>

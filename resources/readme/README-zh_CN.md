@@ -112,7 +112,7 @@ http {
 }
 ```
 
-更多信息请参阅：[debian/conf/nginx.conf](https://salsa.debian.org/nginx-team/nginx/-/blob/master/debian/conf/nginx.conf#L59-L60)
+更多信息请参阅：[debian/conf/nginx.conf](https://salsa.debian.org/nginx-team/nginx/-/blob/debian/latest/debian/conf/nginx.conf#L60-L61)
 
 ### 安装
 
@@ -179,6 +179,7 @@ systemctl restart nginx-ui
 #### 注意
 1. 首次使用时，映射到 `/etc/nginx` 的目录必须为空文件夹。
 2. 如果你想要托管静态文件，可以直接将文件夹映射入容器中。
+3. 如果你从旧镜像升级，请参阅 [Docker WebSocket 修复指南](https://nginxui.com/zh_CN/guide/docker-websocket-fix.html) 以更新 `conf.d/nginx-ui.conf`。
 
 **Docker 部署示例**
 
@@ -215,8 +216,8 @@ docker run -dit \
 请在 `app` 目录中执行以下命令。
 
 ```shell
-pnpm install
-pnpm build
+bun install
+bun run build
 ```
 
 ### 构建后端
@@ -312,6 +313,24 @@ server {
 
 [![GitHub Sponsors](https://img.shields.io/badge/GitHub-Sponsors-ea4aaa?style=for-the-badge&logo=github-sponsors&logoColor=white)](https://github.com/sponsors/nginxui)
 [![Afdian](https://img.shields.io/badge/爱发电-Support-946ce6?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEyIDJMMTMuMDkgOC4yNkwyMCA5TDEzLjA5IDE1Ljc0TDEyIDIyTDEwLjkxIDE1Ljc0TDQgOUwxMC45MSA4LjI2TDEyIDJaIiBmaWxsPSJ3aGl0ZSIvPgo8L3N2Zz4K)](https://afdian.com/a/nginxui)
+
+### 赞助商
+
+<a href="https://www.axisnow.io/zh" target="_blank">
+  <img src="../axisnow-logo.png" alt="AxisNow" width="220px">
+</a>
+
+保护并加速网站与 API，兼顾中国大陆及全球的访问体验，并通过客户端 SDK，将加速与安全能力延伸至原生/移动 App — **自建私有部署 CDN｜订阅式高防 CDN｜自主可控、灵活组合的 CDN 网络。**
+
+### 官方交流群
+
+欢迎加入 Nginx UI 官方微信交流群，和社区用户一起交流使用经验、部署方案与问题排查。
+
+扫描下方二维码添加好友，并备注 `Nginx UI 交流群`，管理员会邀请您加入官方交流群。
+
+<p align="center">
+  <img src="../../docs/public/assets/wechat-community-qr.png" alt="Nginx UI WeChat Community QR Code" width="320">
+</p>
 
 ### 工具支持
 

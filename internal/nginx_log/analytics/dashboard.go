@@ -27,11 +27,11 @@ func (s *service) GetDashboardAnalytics(ctx context.Context, req *DashboardQuery
 		UseMainLogPath: true, // Use main_log_path field for efficient log group queries
 		IncludeFacets:  true,
 		FacetFields:    []string{"browser", "os", "device_type"}, // Removed 'ip' to reduce facet computation
-		FacetSize:      50,   // Significantly reduced for faster facet computation
+		FacetSize:      50,                                       // Significantly reduced for faster facet computation
 		UseCache:       true,
 		SortBy:         "timestamp",
 		SortOrder:      "desc",
-		Limit:          0, // Don't fetch documents, use aggregations instead
+		Limit:          -1, // Facet/aggregation-only query, no documents needed
 	}
 
 	// Execute search
@@ -40,46 +40,18 @@ func (s *service) GetDashboardAnalytics(ctx context.Context, req *DashboardQuery
 		return nil, fmt.Errorf("failed to search logs for dashboard: %w", err)
 	}
 
-	// DEBUG: Check if documents have main_log_path field
-	if result.TotalHits == 0 {
-		logger.Warnf("⚠️ No results found with main_log_path query!")
-		debugReq := &searcher.SearchRequest{
-			Limit:    3,
-			UseCache: false,
-			Fields:   []string{"main_log_path", "file_path", "timestamp"},
-		}
-		if debugResult, debugErr := s.searcher.Search(ctx, debugReq); debugErr == nil {
-			logger.Warnf("📊 Index contains %d total documents", debugResult.TotalHits)
-			if len(debugResult.Hits) > 0 {
-				for i, hit := range debugResult.Hits {
-					logger.Warnf("📄 Document %d fields: %+v", i, hit.Fields)
-					if i >= 2 { break }
-				}
-			}
-		}
-	}
-
-	// --- DIAGNOSTIC LOGGING ---
-	logger.Debugf("Dashboard search completed. Total Hits: %d, Returned Hits: %d, Facets: %d", 
-		result.TotalHits, len(result.Hits), len(result.Facets))
-	if result.TotalHits > uint64(len(result.Hits)) {
-		logger.Warnf("Dashboard sampling: using %d/%d documents for time calculations (%.1f%% coverage)", 
-			len(result.Hits), result.TotalHits, float64(len(result.Hits))/float64(result.TotalHits)*100)
-	}
-	// --- END DIAGNOSTIC LOGGING ---
-
 	// Initialize analytics with empty slices
 	analytics := &DashboardAnalytics{}
+	aggregates := &scanAggregates{}
 
 	// Calculate analytics if we have results
 	if result.TotalHits > 0 {
 		// For now, use batch queries to get complete data
-		analytics.HourlyStats = s.calculateHourlyStatsWithBatch(ctx, req)
-		analytics.DailyStats = s.calculateDailyStatsWithBatch(ctx, req)
-		
+		analytics.HourlyStats, analytics.DailyStats, aggregates = s.calculateTimeBucketStats(ctx, req)
+
 		// Use cardinality counter for efficient unique URLs counting
 		analytics.TopURLs = s.calculateTopURLsWithCardinality(ctx, req)
-		
+
 		analytics.Browsers = s.calculateBrowserStats(result)
 		analytics.OperatingSystems = s.calculateOSStats(result)
 		analytics.Devices = s.calculateDeviceStats(result)
@@ -94,11 +66,10 @@ func (s *service) GetDashboardAnalytics(ctx context.Context, req *DashboardQuery
 	}
 
 	// Calculate summary with cardinality counting for accurate unique pages
-	analytics.Summary = s.calculateDashboardSummaryWithCardinality(ctx, analytics, result, req)
+	analytics.Summary = s.calculateDashboardSummaryWithCardinality(ctx, analytics, result, req, aggregates)
 
 	return analytics, nil
 }
-
 
 // calculateHourlyStats calculates hourly access statistics.
 // Returns 48 hours of data centered around the end_date to support all timezones.
@@ -111,11 +82,11 @@ func (s *service) calculateHourlyStats(result *searcher.SearchResult, startTime,
 	// This covers UTC-12 to UTC+14 timezones
 	endDate := time.Unix(endTime, 0).UTC()
 	endDateStart := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, time.UTC)
-	
+
 	// Create hourly buckets for 48 hours (12 hours before to 36 hours after the UTC date boundary)
 	rangeStart := endDateStart.Add(-12 * time.Hour)
 	rangeEnd := endDateStart.Add(36 * time.Hour)
-	
+
 	// Initialize hourly buckets
 	for t := rangeStart; t.Before(rangeEnd); t = t.Add(time.Hour) {
 		timestamp := t.Unix()
@@ -133,13 +104,13 @@ func (s *service) calculateHourlyStats(result *searcher.SearchResult, startTime,
 		if timestampField, ok := hit.Fields["timestamp"]; ok {
 			if timestampFloat, ok := timestampField.(float64); ok {
 				timestamp := int64(timestampFloat)
-				
+
 				// Check if this hit falls within our 48-hour window
 				if timestamp >= rangeStart.Unix() && timestamp < rangeEnd.Unix() {
 					// Round down to the hour
 					t := time.Unix(timestamp, 0).UTC()
 					hourTimestamp := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.UTC).Unix()
-					
+
 					if stats, exists := hourlyMap[hourTimestamp]; exists {
 						stats.PV++
 						if ipField, ok := hit.Fields["ip"]; ok {
@@ -229,13 +200,13 @@ func (s *service) calculateDailyStats(result *searcher.SearchResult, startTime, 
 // calculateTopURLs calculates top URL statistics from facets (legacy method)
 func (s *service) calculateTopURLs(result *searcher.SearchResult) []URLAccessStats {
 	if facet, ok := result.Facets["path_exact"]; ok {
-		logger.Infof("📊 Facet-based URL calculation: facet.Total=%d, TotalHits=%d", 
+		logger.Infof("📊 Facet-based URL calculation: facet.Total=%d, TotalHits=%d",
 			facet.Total, result.TotalHits)
-		
+
 		urlStats := calculateTopFieldStats(facet, int(result.TotalHits), func(term string, count int, percent float64) URLAccessStats {
 			return URLAccessStats{URL: term, Visits: count, Percent: percent}
 		})
-		
+
 		logger.Infof("📈 Calculated %d URL stats from facet", len(urlStats))
 		return urlStats
 	} else {
@@ -257,14 +228,15 @@ func (s *service) calculateTopURLsWithCardinality(ctx context.Context, req *Dash
 		FacetFields:    []string{"path_exact"},
 		FacetSize:      100, // Reasonable facet size to get top URLs
 		UseCache:       true,
+		Limit:          -1, // Facet-only query, no documents needed
 	}
-	
+
 	result, err := s.searcher.Search(ctx, searchReq)
 	if err != nil {
 		logger.Errorf("Failed to search for URL facets: %v", err)
 		return []URLAccessStats{}
 	}
-	
+
 	// Get actual top URLs with visit counts
 	return s.calculateTopURLs(result)
 }
@@ -309,7 +281,7 @@ func calculateTopFieldStats[T any](
 }
 
 // calculateDashboardSummary calculates summary statistics
-func (s *service) calculateDashboardSummary(analytics *DashboardAnalytics, result *searcher.SearchResult) DashboardSummary {
+func (s *service) calculateDashboardSummary(analytics *DashboardAnalytics, result *searcher.SearchResult, aggregates *scanAggregates, req *DashboardQueryRequest) DashboardSummary {
 	// Calculate total UV from IP facet, which is now reliable.
 	totalUV := 0
 	if result.Facets != nil {
@@ -343,21 +315,39 @@ func (s *service) calculateDashboardSummary(analytics *DashboardAnalytics, resul
 		}
 	}
 
-	return DashboardSummary{
+	// Average QPS spreads the request total over the whole queried range, so a
+	// wide range dilutes it; peak QPS reports the busiest minute instead, which
+	// is what a capacity question is usually about.
+	var avgQPS, peakQPS float64
+	if rangeSeconds := req.EndTime - req.StartTime; rangeSeconds > 0 {
+		avgQPS = float64(totalPV) / float64(rangeSeconds)
+	}
+	if aggregates != nil {
+		peakQPS = float64(aggregates.PeakMinutePV) / 60
+	}
+
+	summary := DashboardSummary{
 		TotalUV:         totalUV,
 		TotalPV:         totalPV,
 		AvgDailyUV:      avgDailyUV,
 		AvgDailyPV:      avgDailyPV,
 		PeakHour:        peakHour,
 		PeakHourTraffic: peakHourTraffic,
+		AvgQPS:          avgQPS,
+		PeakQPS:         peakQPS,
 	}
+	if aggregates != nil {
+		summary.TotalTraffic = aggregates.TotalBytes
+	}
+
+	return summary
 }
 
 // calculateDashboardSummaryWithCardinality calculates enhanced summary statistics using cardinality counters
-func (s *service) calculateDashboardSummaryWithCardinality(ctx context.Context, analytics *DashboardAnalytics, result *searcher.SearchResult, req *DashboardQueryRequest) DashboardSummary {
+func (s *service) calculateDashboardSummaryWithCardinality(ctx context.Context, analytics *DashboardAnalytics, result *searcher.SearchResult, req *DashboardQueryRequest, aggregates *scanAggregates) DashboardSummary {
 	// Start with the basic summary but we'll override the UV calculation
-	summary := s.calculateDashboardSummary(analytics, result)
-	
+	summary := s.calculateDashboardSummary(analytics, result, aggregates, req)
+
 	// Use cardinality counter for accurate unique visitor (UV) counting if available
 	cardinalityCounter := s.getCardinalityCounter()
 	if cardinalityCounter != nil {
@@ -369,60 +359,48 @@ func (s *service) calculateDashboardSummaryWithCardinality(ctx context.Context, 
 			LogPaths:       req.LogPaths,
 			UseMainLogPath: true, // Use main_log_path for efficient log group queries
 		}
-		
+
 		if uvResult, err := cardinalityCounter.Count(ctx, uvCardReq); err == nil {
 			// Override the facet-limited UV count with accurate cardinality count
 			summary.TotalUV = int(uvResult.Cardinality)
-			
+
 			// Recalculate average daily UV with accurate count
 			if len(analytics.DailyStats) > 0 {
 				summary.AvgDailyUV = float64(summary.TotalUV) / float64(len(analytics.DailyStats))
 			}
-			
-			// Log the improvement - handle case where IP facet might not exist
-			facetUV := "N/A"
-			if result.Facets != nil && result.Facets["ip"] != nil {
-				facetUV = fmt.Sprintf("%d", result.Facets["ip"].Total)
-			}
-			logger.Infof("✓ Accurate UV count using Counter: %d (was limited to %s by facet)", 
-				uvResult.Cardinality, facetUV)
+
 		} else {
 			logger.Errorf("Failed to count unique visitors with cardinality counter: %v", err)
-		}
-		
-		// Also count unique pages for additional insights
-		pageCardReq := &searcher.CardinalityRequest{
-			Field:          "path_exact",
-			StartTime:      &req.StartTime,
-			EndTime:        &req.EndTime,
-			LogPaths:       req.LogPaths,
-			UseMainLogPath: true, // Use main_log_path for efficient log group queries
-		}
-		
-		if pageResult, err := cardinalityCounter.Count(ctx, pageCardReq); err == nil {
-			logger.Debugf("Accurate unique pages count: %d (vs Total PV: %d)", pageResult.Cardinality, summary.TotalPV)
-			
-			if pageResult.Cardinality <= uint64(summary.TotalPV) {
-				logger.Infof("✓ Unique pages (%d) ≤ Total PV (%d) - data consistency verified", pageResult.Cardinality, summary.TotalPV)
-			} else {
-				logger.Warnf("⚠ Unique pages (%d) > Total PV (%d) - possible data inconsistency", pageResult.Cardinality, summary.TotalPV)
-			}
-		} else {
-			logger.Errorf("Failed to count unique pages: %v", err)
 		}
 	} else {
 		logger.Warnf("Counter not available, UV count limited by facet size to %d", summary.TotalUV)
 	}
-	
+
 	return summary
 }
 
-// calculateDailyStatsWithBatch calculates daily statistics by fetching data in batches
-func (s *service) calculateDailyStatsWithBatch(ctx context.Context, req *DashboardQueryRequest) []DailyAccessStats {
+// scanAggregates holds the range-wide metrics accumulated while the time
+// buckets are filled. They are collected in that same pass because a second
+// scan over the same documents would double the cost of the dashboard query.
+type scanAggregates struct {
+	// TotalBytes is the sum of bytes_sent over documents inside the requested
+	// range, matching the basis of the summary's TotalPV.
+	TotalBytes int64
+	// PeakMinutePV is the request count of the busiest minute in the range.
+	PeakMinutePV int
+}
+
+// calculateTimeBucketStats computes hourly and daily UV/PV statistics, total
+// traffic and the peak-minute request count in a single pass over the matching
+// documents. Pagination uses a SearchAfter cursor on the (timestamp, _id) sort
+// key: each page costs O(page) instead of the O(offset+page) of offset
+// pagination, so a full scan stays linear in the number of documents.
+func (s *service) calculateTimeBucketStats(ctx context.Context, req *DashboardQueryRequest) ([]HourlyAccessStats, []DailyAccessStats, *scanAggregates) {
+	// Daily buckets cover the requested range (dates in server-local time,
+	// matching the rest of the dashboard).
 	dailyMap := make(map[string]*DailyAccessStats)
 	uniqueIPsPerDay := make(map[string]map[string]bool)
-	
-	// Initialize daily buckets for the entire time range
+
 	start := time.Unix(req.StartTime, 0)
 	end := time.Unix(req.EndTime, 0)
 	for t := start; t.Before(end) || t.Equal(end); t = t.AddDate(0, 0, 1) {
@@ -430,241 +408,152 @@ func (s *service) calculateDailyStatsWithBatch(ctx context.Context, req *Dashboa
 		if _, exists := dailyMap[dateStr]; !exists {
 			dailyMap[dateStr] = &DailyAccessStats{
 				Date:      dateStr,
-				UV:        0,
-				PV:        0,
 				Timestamp: t.Unix(),
 			}
 			uniqueIPsPerDay[dateStr] = make(map[string]bool)
 		}
 	}
-	
-	// Process data in batches to avoid memory issues - significantly increased batch size for maximum performance
-	batchSize := 150000 // Increased batch size for better throughput
-	offset := 0
-	
-	logger.Debugf("📅 Daily stats batch query: start=%d (%s), end=%d (%s), expected days=%d", 
-		req.StartTime, time.Unix(req.StartTime, 0).Format("2006-01-02 15:04:05"),
-		req.EndTime, time.Unix(req.EndTime, 0).Format("2006-01-02 15:04:05"),
-		len(dailyMap))
-	
-	totalProcessedDaily := 0
-	for {
-		searchReq := &searcher.SearchRequest{
-			StartTime:      &req.StartTime,
-			EndTime:        &req.EndTime,
-			LogPaths:       req.LogPaths,
-			UseMainLogPath: true, // Use main_log_path for efficient log group queries
-			Limit:          batchSize,
-			Offset:         offset,
-			Fields:         []string{"timestamp", "ip"},
-			UseCache:       false, // Don't cache intermediate results
-		}
-		
-		result, err := s.searcher.Search(ctx, searchReq)
-		if err != nil {
-			logger.Errorf("Failed to fetch batch at offset %d: %v", offset, err)
-			break
-		}
-		
-		logger.Debugf("🔍 Daily batch %d: returned %d hits, totalHits=%d", 
-			offset/batchSize, len(result.Hits), result.TotalHits)
-		
-		// Process this batch of results
-		processedInBatch := 0
-		for _, hit := range result.Hits {
-			if timestampField, ok := hit.Fields["timestamp"]; ok {
-				if timestampFloat, ok := timestampField.(float64); ok {
-					timestamp := int64(timestampFloat)
-					t := time.Unix(timestamp, 0)
-					dateStr := t.Format("2006-01-02")
-					
-					if stats, exists := dailyMap[dateStr]; exists {
-						stats.PV++
-						processedInBatch++
-						if ipField, ok := hit.Fields["ip"]; ok {
-							if ip, ok := ipField.(string); ok && ip != "" {
-								if !uniqueIPsPerDay[dateStr][ip] {
-									uniqueIPsPerDay[dateStr][ip] = true
-									stats.UV++
-								}
-							}
-						}
-					} else {
-						if offset < 10 { // Only log first few mismatches to avoid spam
-							logger.Debugf("⚠️  Daily: timestamp %d (%s) -> date %s not found in dailyMap", 
-								timestamp, t.Format("2006-01-02 15:04:05"), dateStr)
-						}
-					}
-				} else {
-					if offset < 10 {
-						logger.Debugf("⚠️  Daily: timestamp field is not float64: %T = %v", timestampField, timestampField)
-					}
-				}
-			} else {
-				if offset < 10 {
-					logger.Debugf("⚠️  Daily: no timestamp field in hit: %+v", hit.Fields)
-				}
-			}
-		}
-		
-		logger.Debugf("📝 Daily batch %d: processed %d/%d records", offset/batchSize, processedInBatch, len(result.Hits))
-		
-		// Check if we've processed all results
-		if len(result.Hits) < batchSize {
-			break
-		}
-		
-		offset += batchSize
-		totalProcessedDaily += processedInBatch
-		
-		// Log progress
-		logger.Debugf("Processed %d/%d records for daily stats", offset, result.TotalHits)
-	}
-	
-	logger.Infof("📊 Daily stats processing completed: %d total records processed, %d day buckets", totalProcessedDaily, len(dailyMap))
-	
-	// Convert to slice and sort
-	var stats []DailyAccessStats
-	for _, stat := range dailyMap {
-		stats = append(stats, *stat)
-	}
-	
-	sort.Slice(stats, func(i, j int) bool {
-		return stats[i].Timestamp < stats[j].Timestamp
-	})
-	
-	return stats
-}
 
-// calculateHourlyStatsWithBatch calculates hourly statistics by fetching data in batches
-func (s *service) calculateHourlyStatsWithBatch(ctx context.Context, req *DashboardQueryRequest) []HourlyAccessStats {
-	// Use a map with timestamp as key for easier processing
+	// Hourly buckets cover the requested range plus a timezone buffer
+	// (12 hours on each side, covering UTC-12 to UTC+12).
 	hourlyMap := make(map[int64]*HourlyAccessStats)
 	uniqueIPsPerHour := make(map[int64]map[string]bool)
-	
-	// For user date range queries, cover the full requested range plus timezone buffer
-	// This ensures we capture data in all timezones for the requested dates
-	startDate := time.Unix(req.StartTime, 0).UTC()
-	endDate := time.Unix(req.EndTime, 0).UTC()
-	
-	// Add timezone buffer: 12 hours before start, 12 hours after end
-	// This covers UTC-12 to UTC+12 timezones adequately
-	rangeStart := startDate.Add(-12 * time.Hour)
-	rangeEnd := endDate.Add(12 * time.Hour)
-	
-	// Initialize hourly buckets
+
+	rangeStart := time.Unix(req.StartTime, 0).UTC().Add(-12 * time.Hour)
+	rangeEnd := time.Unix(req.EndTime, 0).UTC().Add(12 * time.Hour)
 	for t := rangeStart; t.Before(rangeEnd); t = t.Add(time.Hour) {
 		timestamp := t.Unix()
 		hourlyMap[timestamp] = &HourlyAccessStats{
 			Hour:      t.Hour(),
-			UV:        0,
-			PV:        0,
 			Timestamp: timestamp,
 		}
 		uniqueIPsPerHour[timestamp] = make(map[string]bool)
 	}
-	
-	// Process data in batches - significantly increased batch size for maximum performance
-	batchSize := 150000 // Increased batch size for better throughput
-	offset := 0
-	
-	// Adjust time range for hourly query
-	hourlyStartTime := rangeStart.Unix()
-	hourlyEndTime := rangeEnd.Unix()
-	
-	logger.Debugf("🕐 Hourly stats batch query: start=%d (%s), end=%d (%s), expected buckets=%d", 
-		hourlyStartTime, time.Unix(hourlyStartTime, 0).Format("2006-01-02 15:04:05"),
-		hourlyEndTime, time.Unix(hourlyEndTime, 0).Format("2006-01-02 15:04:05"),
-		len(hourlyMap))
-	
+
+	// One scan over the wider (hourly) range feeds both bucket sets; documents
+	// outside the daily range simply miss the daily map and are skipped there.
+	scanStart := rangeStart.Unix()
+	scanEnd := rangeEnd.Unix()
+	const batchSize = 10000
+
+	// Traffic and peak-rate figures describe the requested range only, so they
+	// ignore the timezone buffer the hourly buckets need.
+	aggregates := &scanAggregates{}
+	perMinutePV := make(map[int64]int)
+
+	var searchAfter []string
 	totalProcessed := 0
+
 	for {
 		searchReq := &searcher.SearchRequest{
-			StartTime:      &hourlyStartTime,
-			EndTime:        &hourlyEndTime,
+			StartTime:      &scanStart,
+			EndTime:        &scanEnd,
 			LogPaths:       req.LogPaths,
 			UseMainLogPath: true, // Use main_log_path for efficient log group queries
 			Limit:          batchSize,
-			Offset:         offset,
-			Fields:         []string{"timestamp", "ip"},
-			UseCache:       false,
+			SearchAfter:    searchAfter,
+			SortBy:         "timestamp",
+			SortOrder:      "asc",
+			Fields:         []string{"timestamp", "ip", "bytes_sent"},
+			UseCache:       false, // Don't cache intermediate scan pages
 		}
-		
+
 		result, err := s.searcher.Search(ctx, searchReq)
 		if err != nil {
-			logger.Errorf("Failed to fetch batch at offset %d: %v", offset, err)
+			logger.Errorf("Failed to fetch time-bucket batch (processed %d): %v", totalProcessed, err)
 			break
 		}
-		
-		logger.Debugf("🔍 Hourly batch %d: returned %d hits, totalHits=%d", 
-			offset/batchSize, len(result.Hits), result.TotalHits)
-		
-		// Process this batch of results
-		processedInBatch := 0
+
 		for _, hit := range result.Hits {
-			if timestampField, ok := hit.Fields["timestamp"]; ok {
-				if timestampFloat, ok := timestampField.(float64); ok {
-					timestamp := int64(timestampFloat)
-					
-					// Round down to the hour
-					t := time.Unix(timestamp, 0).UTC()
-					hourTimestamp := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.UTC).Unix()
-					
-					if stats, exists := hourlyMap[hourTimestamp]; exists {
-						stats.PV++
-						processedInBatch++
-						if ipField, ok := hit.Fields["ip"]; ok {
-							if ip, ok := ipField.(string); ok && ip != "" {
-								if !uniqueIPsPerHour[hourTimestamp][ip] {
-									uniqueIPsPerHour[hourTimestamp][ip] = true
-									stats.UV++
-								}
-							}
-						}
-					} else {
-						if offset < 10 { // Only log first few mismatches
-							hourStr := time.Unix(hourTimestamp, 0).Format("2006-01-02 15:04:05")
-							logger.Debugf("⚠️  Hourly: timestamp %d (%s) -> hour %d (%s) not found in hourlyMap", 
-								timestamp, t.Format("2006-01-02 15:04:05"), hourTimestamp, hourStr)
-						}
-					}
-				} else {
-					if offset < 10 {
-						logger.Debugf("⚠️  Hourly: timestamp field is not float64: %T = %v", timestampField, timestampField)
+			timestampField, ok := hit.Fields["timestamp"]
+			if !ok {
+				continue
+			}
+			timestampFloat, ok := timestampField.(float64)
+			if !ok {
+				continue
+			}
+			timestamp := int64(timestampFloat)
+
+			var ip string
+			if ipField, ok := hit.Fields["ip"]; ok {
+				ip, _ = ipField.(string)
+			}
+
+			// Range-wide aggregates, restricted to the requested window
+			// Bleve's timestamp range is half-open: include StartTime and
+			// exclude EndTime. Keep aggregates on the same document set as
+			// TotalPV even though this scan uses a wider timezone buffer.
+			if timestamp >= req.StartTime && timestamp < req.EndTime {
+				if bytesField, ok := hit.Fields["bytes_sent"]; ok {
+					if bytesSent, ok := bytesField.(float64); ok {
+						aggregates.TotalBytes += int64(bytesSent)
 					}
 				}
-			} else {
-				if offset < 10 {
-					logger.Debugf("⚠️  Hourly: no timestamp field in hit: %+v", hit.Fields)
+				perMinutePV[timestamp-timestamp%60]++
+			}
+
+			// Daily bucket (server-local date)
+			dateStr := time.Unix(timestamp, 0).Format("2006-01-02")
+			if stats, exists := dailyMap[dateStr]; exists {
+				stats.PV++
+				if ip != "" && !uniqueIPsPerDay[dateStr][ip] {
+					uniqueIPsPerDay[dateStr][ip] = true
+					stats.UV++
+				}
+			}
+
+			// Hourly bucket (UTC hour)
+			t := time.Unix(timestamp, 0).UTC()
+			hourTimestamp := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.UTC).Unix()
+			if stats, exists := hourlyMap[hourTimestamp]; exists {
+				stats.PV++
+				if ip != "" && !uniqueIPsPerHour[hourTimestamp][ip] {
+					uniqueIPsPerHour[hourTimestamp][ip] = true
+					stats.UV++
 				}
 			}
 		}
-		
-		logger.Debugf("📝 Hourly batch %d: processed %d/%d records", offset/batchSize, processedInBatch, len(result.Hits))
-		
-		// Check if we've processed all results
+
+		totalProcessed += len(result.Hits)
+
 		if len(result.Hits) < batchSize {
 			break
 		}
-		
-		offset += batchSize
-		
-		totalProcessed += processedInBatch
-		// Log progress
-		logger.Debugf("Processed %d/%d records for hourly stats", offset, result.TotalHits)
+
+		lastHit := result.Hits[len(result.Hits)-1]
+		if len(lastHit.Sort) == 0 {
+			logger.Warnf("Time-bucket scan: last hit carries no sort values, cannot continue pagination (processed %d)", totalProcessed)
+			break
+		}
+		searchAfter = lastHit.Sort
 	}
-	
-	logger.Infof("📊 Hourly stats processing completed: %d total records processed, %d hour buckets", totalProcessed, len(hourlyMap))
-	
-	// Convert to slice and sort by timestamp
-	var stats []HourlyAccessStats
+
+	for _, pv := range perMinutePV {
+		if pv > aggregates.PeakMinutePV {
+			aggregates.PeakMinutePV = pv
+		}
+	}
+
+	logger.Debugf("Time-bucket stats completed: %d records into %d hourly / %d daily buckets, %d bytes",
+		totalProcessed, len(hourlyMap), len(dailyMap), aggregates.TotalBytes)
+
+	// Convert to sorted slices
+	hourlyStats := make([]HourlyAccessStats, 0, len(hourlyMap))
 	for _, stat := range hourlyMap {
-		stats = append(stats, *stat)
+		hourlyStats = append(hourlyStats, *stat)
 	}
-	
-	sort.Slice(stats, func(i, j int) bool {
-		return stats[i].Timestamp < stats[j].Timestamp
+	sort.Slice(hourlyStats, func(i, j int) bool {
+		return hourlyStats[i].Timestamp < hourlyStats[j].Timestamp
 	})
-	
-	return stats
+
+	dailyStats := make([]DailyAccessStats, 0, len(dailyMap))
+	for _, stat := range dailyMap {
+		dailyStats = append(dailyStats, *stat)
+	}
+	sort.Slice(dailyStats, func(i, j int) bool {
+		return dailyStats[i].Timestamp < dailyStats[j].Timestamp
+	})
+
+	return hourlyStats, dailyStats, aggregates
 }

@@ -18,7 +18,7 @@ jobs:
         ahead: ${{ steps.check.outputs.ahead }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.DEVELOP_BRANCH }}
           clean: false
@@ -46,12 +46,12 @@ jobs:
       WEBLATE_TOKEN: ${{ secrets.WEBLATE_TOKEN }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.14.2'
+          python-version: '3.14.7'
 
       - name: Install wlc
         run: pip install wlc
@@ -69,7 +69,7 @@ jobs:
     if: ${{ needs.check.outputs.ahead > 0 || needs.check.outputs.behind > 0 && always() }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.DEVELOP_BRANCH }}
           fetch-depth: 0

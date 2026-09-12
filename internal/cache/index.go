@@ -28,24 +28,32 @@ type CallbackInfo struct {
 // PostScanCallback is called after all scan callbacks are executed
 type PostScanCallback func()
 
-// ScanConfig holds scanner configuration
+// ScanConfig holds scanner configuration.
+//
+// PeriodicScanInterval is the safety-net rescan interval used when the config
+// directory is on the local filesystem and fsnotify delivers change events.
+// RemoteScanInterval replaces it when the config directory lives on a remote
+// host reached over SFTP: there is no inotify channel for a remote
+// filesystem, so the scanner polls at this (much shorter) interval instead.
 type ScanConfig struct {
-	PeriodicScanInterval    time.Duration
-	InitialScanTimeout      time.Duration
-	ScanTimeoutGrace        time.Duration
-	FileEventDebounce       time.Duration
-	MaxFileSize             int64
-	CallbackTimeout         time.Duration
-	PostCallbackTimeout     time.Duration
-	ShutdownTimeout         time.Duration
-	ForceCleanupTimeout     time.Duration
-	InitialScanWaitTimeout  time.Duration
+	PeriodicScanInterval   time.Duration
+	RemoteScanInterval     time.Duration
+	InitialScanTimeout     time.Duration
+	ScanTimeoutGrace       time.Duration
+	FileEventDebounce      time.Duration
+	MaxFileSize            int64
+	CallbackTimeout        time.Duration
+	PostCallbackTimeout    time.Duration
+	ShutdownTimeout        time.Duration
+	ForceCleanupTimeout    time.Duration
+	InitialScanWaitTimeout time.Duration
 }
 
 // DefaultScanConfig returns default configuration
 func DefaultScanConfig() ScanConfig {
 	return ScanConfig{
 		PeriodicScanInterval:   5 * time.Minute,
+		RemoteScanInterval:     30 * time.Second,
 		InitialScanTimeout:     15 * time.Second,
 		ScanTimeoutGrace:       2 * time.Second,
 		FileEventDebounce:      100 * time.Millisecond,
@@ -93,6 +101,7 @@ type Scanner struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	watcher    *fsnotify.Watcher
+	polling    bool // true when the config directory is remote and fsnotify is unavailable
 	scanTicker *time.Ticker
 	scanning   bool
 	scanMutex  sync.RWMutex
@@ -196,6 +205,14 @@ func getExcludedDirs() []string {
 			nginx.GetConfPath("fastcgi_temp"),
 			nginx.GetConfPath("uwsgi_temp"),
 			nginx.GetConfPath("scgi_temp"),
+			// Static asset directories - these can contain thousands of files
+			// and should not trigger config scanning
+			nginx.GetConfPath("html"),
+			nginx.GetConfPath("www"),
+			nginx.GetConfPath("static"),
+			nginx.GetConfPath("assets"),
+			nginx.GetConfPath("public"),
+			nginx.GetConfPath("webroot"),
 		}
 	})
 	return excludedDirs
@@ -204,11 +221,193 @@ func getExcludedDirs() []string {
 // shouldSkipPath checks if a path should be skipped during scanning or watching
 func shouldSkipPath(path string) bool {
 	for _, excludedDir := range getExcludedDirs() {
-		if excludedDir != "" && strings.HasPrefix(path, excludedDir) {
+		if excludedDir == "" {
+			continue
+		}
+		// Check for exact match or match with path separator to avoid false positives
+		// e.g., excludedDir="/etc/nginx/html" should match "/etc/nginx/html/file"
+		// but NOT "/etc/nginx/html-configs/file"
+		if path == excludedDir || strings.HasPrefix(path, excludedDir+string(filepath.Separator)) {
 			return true
 		}
 	}
 	return false
+}
+
+// staticDirNames contains directory names that typically contain static assets and should not be watched.
+// This single list is used for both Contains (with "/" suffix) and HasSuffix (with "/" prefix) checks.
+var staticDirNames = []string{
+	"dist",
+	"build",
+	"node_modules",
+	"__pycache__",
+	".git",
+	"vendor",
+	"assets",
+	"static",
+	"public",
+	"media",
+	"uploads",
+	"images",
+	"img",
+	"css",
+	"js",
+	"fonts",
+	"__macosx",
+}
+
+// configDirPatterns contains directory names that typically contain nginx config files.
+// Used with path-separator boundaries to avoid false positives.
+var configDirPatterns = []string{
+	"sites-available", "sites-enabled",
+	"streams-available", "streams-enabled",
+	"conf.d", "snippets", "modules-enabled",
+}
+
+// configFilePatterns contains common nginx config file names without extension.
+var configFilePatterns = []string{
+	"nginx.conf",
+	"mime.types",
+	"fastcgi_params",
+	"fastcgi.conf",
+	"scgi_params",
+	"uwsgi_params",
+	"koi-utf",
+	"koi-win",
+	"win-utf",
+	"proxy_params",
+}
+
+// nonConfigExtensions contains file extensions that are definitely not config files.
+// This is a safeguard for files that might be in the root nginx directory.
+var nonConfigExtensions = map[string]bool{
+	// Web assets
+	".html": true, ".htm": true, ".css": true, ".js": true, ".jsx": true, ".ts": true, ".tsx": true,
+	".json": true, ".xml": true, ".svg": true, ".map": true, ".woff": true, ".woff2": true,
+	".ttf": true, ".eot": true, ".otf": true,
+	// Images
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".ico": true, ".webp": true,
+	".bmp": true, ".tiff": true, ".avif": true,
+	// Archives
+	".zip": true, ".tar": true, ".gz": true, ".bz2": true, ".xz": true, ".rar": true, ".7z": true,
+	// Documents
+	".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true, ".ppt": true, ".pptx": true,
+	// Media
+	".mp3": true, ".mp4": true, ".avi": true, ".mov": true, ".wmv": true, ".flv": true, ".webm": true,
+	".ogg": true, ".wav": true,
+	// Other binaries
+	".exe": true, ".dll": true, ".so": true, ".dylib": true, ".bin": true,
+	// Source code (not nginx config)
+	".py": true, ".rb": true, ".php": true, ".java": true, ".go": true, ".rs": true, ".c": true, ".cpp": true,
+	".h": true, ".hpp": true, ".sh": true, ".bat": true, ".ps1": true,
+	// Data files
+	".db": true, ".sqlite": true, ".sql": true, ".csv": true, ".yml": true, ".yaml": true, ".toml": true,
+	".md": true, ".txt": true, ".log": true, ".lock": true,
+}
+
+// shouldWatchDirectory checks if a directory should be watched for config file changes
+// This prevents watching static asset directories that can contain thousands of files
+func shouldWatchDirectory(dirPath string) bool {
+	// Check if directory matches excluded paths
+	if shouldSkipPath(dirPath) {
+		return false
+	}
+
+	// Get the path relative to the nginx config root to avoid matching ancestor directories
+	// e.g., if config root is /opt/vendor/nginx/conf, we don't want to match "/vendor/"
+	// in the ancestor portion of the path
+	configRoot := nginx.GetConfPath()
+	relativePath := dirPath
+	if strings.HasPrefix(dirPath, configRoot) {
+		relativePath = strings.TrimPrefix(dirPath, configRoot)
+	}
+	lowerRelativePath := strings.ToLower(relativePath)
+
+	// Check static directory patterns against the relative path only
+	// This ensures patterns like "/vendor/" only match directories within the config tree,
+	// not ancestor directories in the config root path itself
+	sep := string(filepath.Separator)
+	for _, name := range staticDirNames {
+		// Check if pattern appears in the middle of path (with slashes on both sides)
+		if strings.Contains(lowerRelativePath, sep+name+sep) {
+			return false
+		}
+		// Check if path ends with this directory name (with leading slash)
+		if strings.HasSuffix(lowerRelativePath, sep+name) {
+			return false
+		}
+	}
+
+	// All directories that pass the static directory filter should be watched
+	// This includes known config directories (sites-available, conf.d, etc.) and any other
+	// directories that might contain nginx config files
+	return true
+}
+
+// isConfigFilePath checks if a file path appears to be a nginx configuration file
+// This filters out static assets, binary files, and other non-config files
+func isConfigFilePath(filePath string) bool {
+	// Get the file extension
+	ext := strings.ToLower(filepath.Ext(filePath))
+	baseName := strings.ToLower(filepath.Base(filePath))
+
+	// Use relative path to avoid matching ancestor directories in the config root
+	// e.g., if config root is /srv/conf.d/nginx/, we don't want to match "conf.d"
+	// in the ancestor portion of the path
+	configRoot := nginx.GetConfPath()
+	relativePath := filePath
+	if strings.HasPrefix(filePath, configRoot) {
+		relativePath = strings.TrimPrefix(filePath, configRoot)
+	}
+	lowerRelativePath := strings.ToLower(relativePath)
+	sep := string(filepath.Separator)
+
+	// Check static directory patterns FIRST against the relative path
+	// This must come before config dir check to prevent files in
+	// /etc/nginx/sites-enabled/project/dist/bundle.js from being treated as config
+	for _, name := range staticDirNames {
+		// Check if pattern appears in the path (with slashes on both sides)
+		if strings.Contains(lowerRelativePath, sep+name+sep) {
+			return false
+		}
+	}
+
+	// Check for common nginx config file patterns using relative path with path-separator boundaries
+	// Files in sites-available/sites-enabled/streams-available/streams-enabled/conf.d
+	// are typically config files. Use separator-bounded matching to avoid false positives
+	// like "myconf.db" matching "conf.d" across the name/extension boundary
+	for _, pattern := range configDirPatterns {
+		// Check if pattern appears in the path (with slashes on both sides)
+		// This covers both middle-of-path and start-of-path cases since relativePath
+		// always starts with a separator after TrimPrefix from a Clean'd configRoot
+		if strings.Contains(lowerRelativePath, sep+pattern+sep) {
+			return true
+		}
+	}
+
+	// Files with .conf extension are config files
+	if ext == ".conf" {
+		return true
+	}
+
+	// Common nginx config file patterns without extension
+	// nginx.conf, mime.types, fastcgi_params, etc.
+	for _, pattern := range configFilePatterns {
+		if baseName == pattern {
+			return true
+		}
+	}
+
+	// Exclude common static asset extensions that are definitely not config files
+	// This is a safeguard for files that might be in the root nginx directory
+	if nonConfigExtensions[ext] {
+		return false
+	}
+
+	// For files without recognized extensions that passed all filters,
+	// we conservatively treat them as potential config files
+	// (this allows sites-available/mysite type files)
+	return true
 }
 
 // GetScanner returns the singleton scanner instance
@@ -254,21 +453,30 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 	// Create cancellable context for this scanner instance
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return err
-	}
-	s.watcher = watcher
+	s.polling = shouldPollForChanges()
+	if s.polling {
+		// The config directory is on a remote host accessed over SFTP. fsnotify
+		// can only observe the local filesystem, so instead of watching the
+		// container's own copy of the path we rescan the remote tree on a short
+		// interval (see ScanConfig.RemoteScanInterval).
+		logger.Infof("Nginx config directory is accessed over SFTP; file watching is disabled and the index is refreshed every %s", scanConfig.RemoteScanInterval)
+	} else {
+		watcher, err := fsnotify.NewWatcher()
+		if err != nil {
+			return err
+		}
+		s.watcher = watcher
 
-	// Watch all directories recursively first (this is faster than scanning)
-	if err := s.watchAllDirectories(); err != nil {
-		return err
-	}
+		// Watch all directories recursively first (this is faster than scanning)
+		if err := s.watchAllDirectories(); err != nil {
+			return err
+		}
 
-	// Start background processes
-	s.wg.Go(func() {
-		s.watchForChanges()
-	})
+		// Start background processes
+		s.wg.Go(func() {
+			s.watchForChanges()
+		})
+	}
 
 	s.wg.Go(func() {
 		s.periodicScan()
@@ -282,6 +490,28 @@ func (s *Scanner) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// shouldPollForChanges reports whether the scanner has to fall back to
+// periodic polling because the nginx config directory is not on the local
+// filesystem. Local and external-container modes (and host_via_ssh with a
+// mounted config directory) keep using fsnotify. An invalid access mode is
+// logged and treated like the local filesystem so the scanner still starts.
+func shouldPollForChanges() bool {
+	usesSFTP, err := nginx.UsesSFTPTarget()
+	if err != nil {
+		logger.Warnf("Cannot determine nginx target filesystem, falling back to local file watching: %v", err)
+		return false
+	}
+	return usesSFTP
+}
+
+// periodicScanInterval returns the rescan interval for the current mode.
+func (s *Scanner) periodicScanInterval() time.Duration {
+	if s.polling && scanConfig.RemoteScanInterval > 0 {
+		return scanConfig.RemoteScanInterval
+	}
+	return scanConfig.PeriodicScanInterval
+}
+
 // watchAllDirectories recursively adds all directories under nginx config path to watcher
 func (s *Scanner) watchAllDirectories() error {
 	root := nginx.GetConfPath()
@@ -292,8 +522,15 @@ func (s *Scanner) watchAllDirectories() error {
 		}
 
 		if d.IsDir() {
-			// Skip excluded directories (ssl, cache, logs, temp, etc.)
+			// Skip excluded directories (ssl, cache, logs, temp, static assets, etc.)
 			if shouldSkipPath(path) {
+				logger.Debug("Skipping excluded directory from watcher:", path)
+				return filepath.SkipDir
+			}
+
+			// Skip directories that shouldn't be watched (static assets, etc.)
+			if !shouldWatchDirectory(path) {
+				logger.Debug("Skipping non-config directory from watcher:", path)
 				return filepath.SkipDir
 			}
 
@@ -321,7 +558,7 @@ func (s *Scanner) watchAllDirectories() error {
 
 // periodicScan runs periodic scans
 func (s *Scanner) periodicScan() {
-	s.scanTicker = time.NewTicker(scanConfig.PeriodicScanInterval)
+	s.scanTicker = time.NewTicker(s.periodicScanInterval())
 	defer s.scanTicker.Stop()
 
 	for {
@@ -494,19 +731,28 @@ func (s *Scanner) handleFileEvent(event fsnotify.Event) {
 		return
 	}
 
-	// Add new directories to watch
+	// Add new directories to watch (but only if they could contain config files)
 	if event.Has(fsnotify.Create) {
-		if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
-			if err := s.watcher.Add(event.Name); err != nil {
-				logger.Error("Failed to add new directory to watcher:", event.Name, err)
+		if fi, err := nginx.Stat(event.Name); err == nil && fi.IsDir() {
+			// Skip adding directories that are clearly static asset directories
+			if shouldWatchDirectory(event.Name) {
+				if err := s.watcher.Add(event.Name); err != nil {
+					logger.Error("Failed to add new directory to watcher:", event.Name, err)
+				} else {
+					logger.Debug("Added new directory to watcher:", event.Name)
+				}
 			} else {
-				logger.Debug("Added new directory to watcher:", event.Name)
+				logger.Debug("Skipping non-config directory from watcher:", event.Name)
 			}
 		}
 	}
 
 	// Handle file removal - need to trigger rescan to update indices
 	if event.Has(fsnotify.Remove) {
+		// Only process config file removals
+		if !isConfigFilePath(event.Name) {
+			return
+		}
 		logger.Debug("Config removed:", event.Name)
 		// Trigger callbacks with empty content to allow them to clean up their indices
 		// Don't skip post-scan for single file events (manual operations)
@@ -515,7 +761,7 @@ func (s *Scanner) handleFileEvent(event fsnotify.Event) {
 	}
 
 	// Use Lstat to get symlink info without following it
-	fi, err := os.Lstat(event.Name)
+	fi, err := nginx.Lstat(event.Name)
 	if err != nil {
 		return
 	}
@@ -524,7 +770,7 @@ func (s *Scanner) handleFileEvent(event fsnotify.Event) {
 	var targetIsDir bool
 	if fi.Mode()&os.ModeSymlink != 0 {
 		// For symlinks, check the target
-		targetFi, err := os.Stat(event.Name)
+		targetFi, err := nginx.Stat(event.Name)
 		if err != nil {
 			logger.Debug("Symlink target not accessible:", event.Name, err)
 			return
@@ -538,6 +784,10 @@ func (s *Scanner) handleFileEvent(event fsnotify.Event) {
 	if targetIsDir {
 		logger.Debug("Directory changed:", event.Name)
 	} else {
+		// Skip non-config files to avoid I/O overload from static assets
+		if !isConfigFilePath(event.Name) {
+			return
+		}
 		logger.Debug("File changed:", event.Name)
 		// Use debouncer to avoid rapid repeated scans
 		s.debouncer.debounce(event.Name, scanConfig.FileEventDebounce, func() {
@@ -559,26 +809,32 @@ func (s *Scanner) scanSingleFileInternal(filePath string, skipPostScan bool) err
 
 	// Check if path should be skipped
 	if shouldSkipPath(filePath) {
-		logger.Debugf("File skipped by shouldSkipPath: %s", filePath)
+		return nil
+	}
+
+	// Skip non-config files early to avoid unnecessary I/O
+	if !isConfigFilePath(filePath) {
 		return nil
 	}
 
 	// Get file info to check type and size
-	fileInfo, err := os.Lstat(filePath) // Use Lstat to avoid following symlinks
+	// Use Lstat to avoid following symlinks. All file access goes through the
+	// nginx target filesystem so the index describes the host's config tree in
+	// host_via_ssh + sftp mode instead of the container's own copy.
+	fileInfo, err := nginx.Lstat(filePath)
 	if err != nil {
 		return err
 	}
 
 	// Skip directories
 	if fileInfo.IsDir() {
-		logger.Debugf("Skipping directory: %s", filePath)
 		return nil
 	}
 
 	// Handle symlinks carefully
 	if fileInfo.Mode()&os.ModeSymlink != 0 {
 		// Check what the symlink points to
-		targetInfo, err := os.Stat(filePath)
+		targetInfo, err := nginx.Stat(filePath)
 		if err != nil {
 			logger.Debugf("Skipping symlink with inaccessible target: %s (%v)", filePath, err)
 			return nil
@@ -586,18 +842,36 @@ func (s *Scanner) scanSingleFileInternal(filePath string, skipPostScan bool) err
 
 		// Skip symlinks to directories
 		if targetInfo.IsDir() {
-			logger.Debugf("Skipping symlink to directory: %s", filePath)
 			return nil
 		}
 
+		// Give every consumer the target's identity before reading its content.
+		resolvedPath, err := nginx.EvalSymlinks(filePath)
+		if err != nil {
+			logger.Debugf("Skipping unresolved symlink: %s (%v)", filePath, err)
+			return nil
+		}
+
+		// Keep the configured root prefix so symlink scans and file events use
+		// the same key even when an ancestor of the config directory is a symlink.
+		root := nginx.GetConfPath()
+		resolvedRoot, err := nginx.EvalSymlinks(root)
+		if err != nil {
+			logger.Debugf("Skipping symlink with unresolved config root: %s (%v)", filePath, err)
+			return nil
+		}
+		if relativePath, err := filepath.Rel(resolvedRoot, resolvedPath); err == nil &&
+			relativePath != ".." && !strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+			resolvedPath = filepath.Join(root, relativePath)
+		}
+		filePath = resolvedPath
+
 		// Process symlinks to files, but use the target's info for size check
 		fileInfo = targetInfo
-		// logger.Debugf("Processing symlink to file: %s", filePath)
 	}
 
 	// Skip non-regular files (devices, pipes, sockets, etc.)
 	if !fileInfo.Mode().IsRegular() {
-		logger.Debugf("Skipping non-regular file: %s (mode: %s)", filePath, fileInfo.Mode())
 		return nil
 	}
 
@@ -608,9 +882,9 @@ func (s *Scanner) scanSingleFileInternal(filePath string, skipPostScan bool) err
 	}
 
 	// Read file content
-	content, err := os.ReadFile(filePath)
+	content, err := nginx.ReadFile(filePath)
 	if err != nil {
-		logger.Errorf("os.ReadFile failed for %s: %v", filePath, err)
+		logger.Errorf("ReadFile failed for %s: %v", filePath, err)
 		return err
 	}
 
@@ -719,7 +993,7 @@ func (s *Scanner) scanDirectoryRecursiveInternal(ctx context.Context, root strin
 	}
 
 	// Resolve symlinks and check for loops
-	realPath, err := filepath.EvalSymlinks(root)
+	realPath, err := nginx.EvalSymlinks(root)
 	if err != nil {
 		// If we can't resolve, use original path
 		realPath = root
@@ -733,7 +1007,7 @@ func (s *Scanner) scanDirectoryRecursiveInternal(ctx context.Context, root strin
 	visited[realPath] = true
 
 	// Read directory entries
-	entries, err := os.ReadDir(root)
+	entries, err := nginx.ReadDir(root)
 	if err != nil {
 		logger.Errorf("Failed to read directory %s: %v", root, err)
 		return err
@@ -762,7 +1036,11 @@ func (s *Scanner) scanDirectoryRecursiveInternal(ctx context.Context, root strin
 
 			// Skip excluded directories
 			if shouldSkipPath(fullPath) {
-				logger.Debugf("Skipping excluded directory: %s", fullPath)
+				continue
+			}
+
+			// Skip directories that shouldn't be scanned (static assets, etc.)
+			if !shouldWatchDirectory(fullPath) {
 				continue
 			}
 
@@ -776,9 +1054,13 @@ func (s *Scanner) scanDirectoryRecursiveInternal(ctx context.Context, root strin
 
 			// Handle symlinks
 			if entryType&os.ModeSymlink != 0 {
-				targetInfo, err := os.Stat(fullPath)
+				targetInfo, err := nginx.Stat(fullPath)
 				if err == nil {
 					if targetInfo.IsDir() {
+						// Check if symlink directory should be scanned
+						if !shouldWatchDirectory(fullPath) {
+							continue
+						}
 						// Recursively scan symlink directory (with loop detection)
 						if err := s.scanDirectoryRecursiveInternal(ctx, fullPath, fileCount, dirCount, visited); err != nil {
 							logger.Errorf("Failed to scan symlink directory %s: %v", fullPath, err)
@@ -786,13 +1068,16 @@ func (s *Scanner) scanDirectoryRecursiveInternal(ctx context.Context, root strin
 						continue
 					}
 				} else {
-					logger.Warnf("os.Stat failed for symlink %s: %v", fullPath, err)
+					logger.Warnf("Stat failed for symlink %s: %v", fullPath, err)
 				}
 			}
 
 			// Process regular files - skip post-scan during batch scan
-			if err := s.scanSingleFileInternal(fullPath, true); err != nil {
-				logger.Errorf("Failed to scan file %s: %v", fullPath, err)
+			// scanSingleFileInternal already checks isConfigFilePath, but we skip early for efficiency
+			if isConfigFilePath(fullPath) {
+				if err := s.scanSingleFileInternal(fullPath, true); err != nil {
+					logger.Errorf("Failed to scan file %s: %v", fullPath, err)
+				}
 			}
 		}
 	}

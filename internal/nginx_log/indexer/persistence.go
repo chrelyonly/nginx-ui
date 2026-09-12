@@ -1,28 +1,27 @@
 package indexer
 
 import (
-	"context"
 	"fmt"
-	"path/filepath"
-	"regexp"
-	"strings"
+	"sync"
 	"time"
 
+	"github.com/0xJacky/Nginx-UI/internal/nginx_log/utils"
 	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/0xJacky/Nginx-UI/query"
-	"github.com/uozi-tech/cosy"
 	"github.com/uozi-tech/cosy/logger"
 	"gorm.io/gen/field"
+	"gorm.io/gorm"
 )
 
 // PersistenceManager handles database operations for log index positions
 // Enhanced for incremental indexing with position tracking
 type PersistenceManager struct {
 	// Configuration for incremental indexing
-	maxBatchSize  int
-	flushInterval time.Duration
-	enabledPaths  map[string]bool // Cache for enabled paths
-	lastFlushTime time.Time
+	maxBatchSize   int
+	flushInterval  time.Duration
+	enabledPathsMu sync.RWMutex
+	enabledPaths   map[string]bool // Cache for enabled paths
+	lastFlushTime  time.Time
 }
 
 // LogFileInfo represents information about a log file for incremental indexing
@@ -119,9 +118,25 @@ func (pm *PersistenceManager) SaveLogIndex(logIndex *model.NginxLogIndex) error 
 	*logIndex = *savedRecord
 
 	// Update cache
-	pm.enabledPaths[logIndex.Path] = logIndex.Enabled
+	pm.setEnabledPath(logIndex.Path, logIndex.Enabled)
 
 	return nil
+}
+
+// setEnabledPath updates the enabled-paths cache under the write lock.
+func (pm *PersistenceManager) setEnabledPath(path string, enabled bool) {
+	pm.enabledPathsMu.Lock()
+	defer pm.enabledPathsMu.Unlock()
+	if pm.enabledPaths != nil {
+		pm.enabledPaths[path] = enabled
+	}
+}
+
+// resetEnabledPaths replaces the enabled-paths cache under the write lock.
+func (pm *PersistenceManager) resetEnabledPaths(paths map[string]bool) {
+	pm.enabledPathsMu.Lock()
+	defer pm.enabledPathsMu.Unlock()
+	pm.enabledPaths = paths
 }
 
 // GetIncrementalInfo retrieves incremental indexing information for a log file
@@ -158,7 +173,10 @@ func (pm *PersistenceManager) UpdateIncrementalInfo(path string, info *LogFileIn
 // IsPathEnabled checks if indexing is enabled for a path (with caching)
 func (pm *PersistenceManager) IsPathEnabled(path string) (bool, error) {
 	// Check cache first
-	if enabled, exists := pm.enabledPaths[path]; exists {
+	pm.enabledPathsMu.RLock()
+	enabled, exists := pm.enabledPaths[path]
+	pm.enabledPathsMu.RUnlock()
+	if exists {
 		return enabled, nil
 	}
 
@@ -169,7 +187,7 @@ func (pm *PersistenceManager) IsPathEnabled(path string) (bool, error) {
 	}
 
 	// Update cache
-	pm.enabledPaths[path] = logIndex.Enabled
+	pm.setEnabledPath(path, logIndex.Enabled)
 	return logIndex.Enabled, nil
 }
 
@@ -256,7 +274,9 @@ func (pm *PersistenceManager) DeleteLogIndex(path string) error {
 	}
 
 	// Remove from cache
+	pm.enabledPathsMu.Lock()
 	delete(pm.enabledPaths, path)
+	pm.enabledPathsMu.Unlock()
 
 	logger.Infof("Hard deleted log index for path: %s", path)
 	return nil
@@ -271,7 +291,7 @@ func (pm *PersistenceManager) DisableLogIndex(path string) error {
 	}
 
 	// Update cache
-	pm.enabledPaths[path] = false
+	pm.setEnabledPath(path, false)
 
 	logger.Infof("Disabled log index for path: %s", path)
 	return nil
@@ -286,7 +306,7 @@ func (pm *PersistenceManager) EnableLogIndex(path string) error {
 	}
 
 	// Update cache
-	pm.enabledPaths[path] = true
+	pm.setEnabledPath(path, true)
 
 	logger.Infof("Enabled log index for path: %s", path)
 	return nil
@@ -304,7 +324,7 @@ func (pm *PersistenceManager) CleanupOldIndexes(maxAge time.Duration) error {
 	if result.RowsAffected > 0 {
 		logger.Infof("Cleaned up %d old log index records", result.RowsAffected)
 		// Clear cache for cleaned up entries
-		pm.enabledPaths = make(map[string]bool)
+		pm.resetEnabledPaths(make(map[string]bool))
 	}
 
 	return nil
@@ -406,11 +426,13 @@ func (pm *PersistenceManager) SetIndexStatus(path, status string, queuePosition 
 
 // GetIncompleteIndexingTasks returns all files that have incomplete indexing tasks
 func (pm *PersistenceManager) GetIncompleteIndexingTasks() ([]*model.NginxLogIndex, error) {
-	// Use direct database query since query fields are not generated yet
-	db := cosy.UseDB(context.Background())
+	db, err := persistenceDB()
+	if err != nil {
+		return nil, err
+	}
 	var indexes []*model.NginxLogIndex
 
-	err := db.Where("enabled = ? AND index_status IN ?", true, []string{
+	err = db.Where("enabled = ? AND index_status IN ?", true, []string{
 		string(IndexStatusIndexing),
 		string(IndexStatusQueued),
 	}).Order("queue_position").Find(&indexes).Error
@@ -424,11 +446,13 @@ func (pm *PersistenceManager) GetIncompleteIndexingTasks() ([]*model.NginxLogInd
 
 // GetQueuedTasks returns all queued indexing tasks ordered by queue position
 func (pm *PersistenceManager) GetQueuedTasks() ([]*model.NginxLogIndex, error) {
-	// Use direct database query since query fields are not generated yet
-	db := cosy.UseDB(context.Background())
+	db, err := persistenceDB()
+	if err != nil {
+		return nil, err
+	}
 	var indexes []*model.NginxLogIndex
 
-	err := db.Where("enabled = ? AND index_status = ?", true, string(IndexStatusQueued)).Order("queue_position").Find(&indexes).Error
+	err = db.Where("enabled = ? AND index_status = ?", true, string(IndexStatusQueued)).Order("queue_position").Find(&indexes).Error
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get queued tasks: %w", err)
@@ -440,10 +464,12 @@ func (pm *PersistenceManager) GetQueuedTasks() ([]*model.NginxLogIndex, error) {
 // ResetIndexingTasks resets all indexing and queued tasks to not_indexed state
 // This is useful during startup to clear stale states
 func (pm *PersistenceManager) ResetIndexingTasks() error {
-	// Use direct database query
-	db := cosy.UseDB(context.Background())
+	db, err := persistenceDB()
+	if err != nil {
+		return err
+	}
 
-	err := db.Model(&model.NginxLogIndex{}).Where("index_status IN ?", []string{
+	err = db.Model(&model.NginxLogIndex{}).Where("index_status IN ?", []string{
 		string(IndexStatusIndexing),
 		string(IndexStatusQueued),
 	}).Updates(map[string]interface{}{
@@ -459,7 +485,7 @@ func (pm *PersistenceManager) ResetIndexingTasks() error {
 	}
 
 	// Clear cache
-	pm.enabledPaths = make(map[string]bool)
+	pm.resetEnabledPaths(make(map[string]bool))
 
 	logger.Info("Reset all incomplete indexing tasks")
 	return nil
@@ -467,8 +493,10 @@ func (pm *PersistenceManager) ResetIndexingTasks() error {
 
 // GetIndexingTaskStats returns statistics about indexing tasks
 func (pm *PersistenceManager) GetIndexingTaskStats() (map[string]int64, error) {
-	// Use direct database query
-	db := cosy.UseDB(context.Background())
+	db, err := persistenceDB()
+	if err != nil {
+		return nil, err
+	}
 	stats := make(map[string]int64)
 
 	// Count by status
@@ -497,7 +525,7 @@ func (pm *PersistenceManager) GetIndexingTaskStats() (map[string]int64, error) {
 // Close flushes any pending operations and cleans up resources
 func (pm *PersistenceManager) Close() error {
 	// Flush any pending operations
-	pm.enabledPaths = nil
+	pm.resetEnabledPaths(nil)
 	return nil
 }
 
@@ -505,16 +533,30 @@ func (pm *PersistenceManager) Close() error {
 func (pm *PersistenceManager) DeleteAllLogIndexes() error {
 	// GORM's `Delete` requires a WHERE clause for safety. To delete all records,
 	// we use a raw Exec call, which is the standard way to perform bulk operations.
-	db := cosy.UseDB(context.Background())
+	db, err := persistenceDB()
+	if err != nil {
+		return err
+	}
 	if err := db.Exec("DELETE FROM nginx_log_indices").Error; err != nil {
 		return fmt.Errorf("failed to delete all log indexes: %w", err)
 	}
 
 	// Clear cache
-	pm.enabledPaths = make(map[string]bool)
+	pm.resetEnabledPaths(make(map[string]bool))
 
 	logger.Infof("Hard deleted all log index records")
 	return nil
+}
+
+func persistenceDB() (*gorm.DB, error) {
+	if query.Q == nil || !query.Q.Available() {
+		return nil, fmt.Errorf("nginx log metadata database is not initialized")
+	}
+	db := query.Q.UnderlyingDB()
+	if db == nil {
+		return nil, fmt.Errorf("nginx log metadata database is not initialized")
+	}
+	return db, nil
 }
 
 // DeleteLogIndexesByGroup deletes all log index records for a specific log group.
@@ -550,10 +592,11 @@ func (pm *PersistenceManager) RefreshCache() error {
 	}
 
 	// Rebuild cache
-	pm.enabledPaths = make(map[string]bool)
+	rebuilt := make(map[string]bool, len(indexes))
 	for _, index := range indexes {
-		pm.enabledPaths[index.Path] = index.Enabled
+		rebuilt[index.Path] = index.Enabled
 	}
+	pm.resetEnabledPaths(rebuilt)
 
 	return nil
 }
@@ -596,96 +639,9 @@ func (pm *PersistenceManager) GetIncrementalIndexStats(mainLogPath string) (*Inc
 	}, nil
 }
 
-// getMainLogPathFromFile extracts the main log path from a file (including rotated files)
-// Enhanced for better rotation pattern detection
+// getMainLogPathFromFile extracts the main log path from a file (including
+// rotated files). The canonical implementation lives in the utils package so
+// all grouping logic across packages shares it.
 func getMainLogPathFromFile(filePath string) string {
-	dir := filepath.Dir(filePath)
-	filename := filepath.Base(filePath)
-
-	// Remove compression extensions (.gz, .bz2, .xz, .lz4)
-	for _, ext := range []string{".gz", ".bz2", ".xz", ".lz4"} {
-		filename = strings.TrimSuffix(filename, ext)
-	}
-
-	// Check if it's a dot-separated date rotation FIRST (access.log.YYYYMMDD or access.log.YYYY.MM.DD)
-	// This must come before numbered rotation check to avoid false positives
-	parts := strings.Split(filename, ".")
-	if len(parts) >= 3 {
-		// First check for multi-part date patterns like YYYY.MM.DD (need at least 4 parts total)
-		if len(parts) >= 4 {
-			// Try to match the last 3 parts as a date
-			lastThreeParts := strings.Join(parts[len(parts)-3:], ".")
-			// Check if this looks like YYYY.MM.DD pattern
-			if matched, _ := regexp.MatchString(`^\d{4}\.\d{2}\.\d{2}$`, lastThreeParts); matched {
-				// Remove the date parts (last 3 parts)
-				basenameParts := parts[:len(parts)-3]
-				baseFilename := strings.Join(basenameParts, ".")
-				return filepath.Join(dir, baseFilename)
-			}
-		}
-
-		// Then check for single-part date patterns in the last part
-		lastPart := parts[len(parts)-1]
-		if isFullDatePattern(lastPart) { // Only match full date patterns, not partial ones
-			// Remove the date part
-			basenameParts := parts[:len(parts)-1]
-			baseFilename := strings.Join(basenameParts, ".")
-			return filepath.Join(dir, baseFilename)
-		}
-	}
-
-	// Handle numbered rotation (access.log.1, access.log.2, etc.)
-	// This comes AFTER date pattern checks to avoid matching date components as rotation numbers
-	if match := regexp.MustCompile(`^(.+)\.(\d{1,3})$`).FindStringSubmatch(filename); len(match) > 1 {
-		baseFilename := match[1]
-		return filepath.Join(dir, baseFilename)
-	}
-
-	// Handle middle-numbered rotation (access.1.log, access.2.log)
-	if match := regexp.MustCompile(`^(.+)\.(\d{1,3})\.log$`).FindStringSubmatch(filename); len(match) > 1 {
-		baseName := match[1]
-		return filepath.Join(dir, baseName+".log")
-	}
-
-	// Handle date-based rotation (access.20231201, access.2023-12-01, etc.)
-	if isDatePattern(filename) {
-		// This is a date-based rotation, return the parent directory
-		// as we can't determine the exact base name
-		return filepath.Join(dir, "access.log") // Default assumption
-	}
-
-	// If no rotation pattern is found, return the original path
-	return filePath
-}
-
-// isDatePattern checks if a string looks like a date pattern (including multi-part)
-func isDatePattern(s string) bool {
-	// Check for full date patterns first
-	if isFullDatePattern(s) {
-		return true
-	}
-
-	// Check for multi-part date patterns like YYYY.MM.DD
-	if matched, _ := regexp.MatchString(`^2\d{3}\.\d{2}\.\d{2}$`, s); matched {
-		return true
-	}
-
-	return false
-}
-
-// isFullDatePattern checks if a string is a complete date pattern (not partial)
-func isFullDatePattern(s string) bool {
-	// Complete date patterns for log rotation
-	patterns := []string{
-		`^\d{8}$`,             // YYYYMMDD
-		`^\d{4}-\d{2}-\d{2}$`, // YYYY-MM-DD
-		`^\d{6}$`,             // YYMMDD
-	}
-
-	for _, pattern := range patterns {
-		if matched, _ := regexp.MatchString(pattern, s); matched {
-			return true
-		}
-	}
-	return false
+	return utils.MainLogPathFromFile(filePath)
 }

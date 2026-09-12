@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { TwoFAStatus } from '@/api/2fa'
-import { KeyOutlined } from '@ant-design/icons-vue'
+import { KeyOutlined } from '@antdv-next/icons'
 import { startAuthentication } from '@simplewebauthn/browser'
 import twoFA from '@/api/2fa'
 import OTPInput from '@/components/OTPInput'
@@ -52,7 +52,7 @@ async function passkeyAuthenticate() {
     options: asseResp,
   })
 
-  emit('submitSecureSessionID', r.session_id)
+  emit('submitSecureSessionID', r.session_id, r.session_ttl)
 
   passkeyLoading.value = false
 }
@@ -65,12 +65,20 @@ onMounted(() => {
 
 <template>
   <div>
+    <AAlert
+      v-if="twoFAStatus.recovery_codes_migration_required"
+      class="mb-4"
+      type="warning"
+      show-icon
+      :title="$gettext('Your account still uses a legacy recovery code. Generate new recovery codes after verification to keep account recovery secure.')"
+    />
+
     <div
       v-if="useRecoveryCode"
       class="mt-2 mb-4"
     >
       <p>{{ $gettext('Input the recovery code:') }}</p>
-      <AInputGroup compact>
+      <ASpaceCompact block>
         <AInput v-model:value="recoveryCode" placeholder="xxxxx-xxxxx" />
         <AButton
           type="primary"
@@ -78,7 +86,7 @@ onMounted(() => {
         >
           {{ $gettext('Recovery') }}
         </AButton>
-      </AInputGroup>
+      </ASpaceCompact>
     </div>
 
     <div v-if="twoFAStatus.otp_status && !useRecoveryCode">
@@ -110,7 +118,7 @@ onMounted(() => {
       </AButton>
     </div>
 
-    <div v-if="twoFAStatus.otp_status || twoFAStatus.recovery_codes_generated" class="flex justify-center mt-3">
+    <div v-if="twoFAStatus.otp_status || twoFAStatus.recovery_codes_generated || twoFAStatus.recovery_codes_migration_required" class="flex justify-center mt-3">
       <a
         v-if="!useRecoveryCode"
         @click="clickUseRecoveryCode"
@@ -122,9 +130,3 @@ onMounted(() => {
     </div>
   </div>
 </template>
-
-<style scoped lang="less">
-:deep(.ant-input-group.ant-input-group-compact) {
-  display: flex;
-}
-</style>

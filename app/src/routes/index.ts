@@ -74,17 +74,18 @@ const router = createRouter({
 
 const nprogress = useNProgress()
 
-router.beforeEach((to, _, next) => {
+router.beforeEach(to => {
   document.title = `${to?.meta.name?.() ?? ''} | Nginx UI`
 
   nprogress.start()
 
   const user = useUserStore()
+  user.expireSession()
 
   if (to.meta.noAuth || user.isLogin)
-    next()
-  else
-    next({ path: '/login', query: { next: to.fullPath } })
+    return true
+
+  return { path: '/login', query: { next: to.fullPath } }
 })
 
 router.afterEach(() => {

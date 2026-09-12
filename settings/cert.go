@@ -1,11 +1,11 @@
 package settings
 
-import "github.com/go-acme/lego/v4/lego"
+import "github.com/go-acme/lego/v5/lego"
 
 type Cert struct {
 	Email                string   `json:"email" protected:"true"`
 	CADir                string   `json:"ca_dir" binding:"omitempty,url"`
-	RenewalInterval      int      `json:"renewal_interval" binding:"min=7,max=21"`
+	RenewalInterval      int      `json:"renewal_interval" binding:"min=1,max=90"`
 	RecursiveNameservers []string `json:"recursive_nameservers" binding:"omitempty,dive,hostname_port"`
 	HTTPChallengePort    string   `json:"http_challenge_port"`
 }
@@ -13,7 +13,7 @@ type Cert struct {
 var CertSettings = &Cert{
 	Email:                "",
 	CADir:                "",
-	RenewalInterval:      7,
+	RenewalInterval:      30,
 	RecursiveNameservers: []string{},
 	HTTPChallengePort:    "9180",
 }
@@ -22,15 +22,16 @@ func (s *Cert) GetCADir() string {
 	if s.CADir != "" {
 		return s.CADir
 	}
-	return lego.LEDirectoryProduction
+	return lego.DirectoryURLLetsEncrypt
 }
 
+// GetCertRenewalInterval returns the configured remaining-validity threshold in days.
 func (s *Cert) GetCertRenewalInterval() int {
-	if s.RenewalInterval < 7 {
-		return 7
+	if s.RenewalInterval < 1 {
+		return 1
 	}
-	if s.RenewalInterval > 21 {
-		return 21
+	if s.RenewalInterval > 90 {
+		return 90
 	}
 	return s.RenewalInterval
 }

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -86,8 +85,24 @@ func (lm *LogFileManager) AddLogPath(path, logType, name, configFile string) {
 	}
 }
 
+// RemoveLogPath removes a single log path from the log cache
+func (lm *LogFileManager) RemoveLogPath(path string) {
+	lm.cacheMutex.Lock()
+	defer lm.cacheMutex.Unlock()
+
+	delete(lm.logCache, path)
+}
+
 // RemoveLogPathsFromConfig removes all log paths associated with a specific config file
 func (lm *LogFileManager) RemoveLogPathsFromConfig(configFile string) {
+	if configFile == "" {
+		// An empty ConfigFile marks an entry that no configuration file owns,
+		// such as the nginx default access/error logs. Removing by that marker
+		// would wipe every one of them, so it is refused.
+		logger.Warn("Ignoring a request to remove nginx log paths for an empty config file")
+		return
+	}
+
 	lm.cacheMutex.Lock()
 	defer lm.cacheMutex.Unlock()
 
@@ -150,37 +165,11 @@ func (lm *LogFileManager) GetIndexingFiles() []string {
 	return files
 }
 
-// getBaseLogName determines the base log file name for grouping rotated files
+// getBaseLogName determines the base log file name for grouping rotated files.
+// It delegates to the canonical implementation so grouping always matches the
+// MainLogPath persisted in the index metadata.
 func getBaseLogName(filePath string) string {
-	dir := filepath.Dir(filePath)
-	filename := filepath.Base(filePath)
-
-	// Remove compression extensions first
-	filename = strings.TrimSuffix(filename, ".gz")
-	filename = strings.TrimSuffix(filename, ".bz2")
-
-	// Handle numbered rotation (access.log.1, access.log.2, etc.)
-	if match := regexp.MustCompile(`^(.+)\.(\d+)$`).FindStringSubmatch(filename); len(match) > 1 {
-		baseFilename := match[1]
-		return filepath.Join(dir, baseFilename)
-	}
-
-	// Handle date rotation suffixes
-	parts := strings.Split(filename, ".")
-	if len(parts) >= 2 {
-		lastPart := parts[len(parts)-1]
-		if isDatePattern(lastPart) {
-			baseFilename := strings.Join(parts[:len(parts)-1], ".")
-			// If the base doesn't end with .log, add it
-			if !strings.HasSuffix(baseFilename, ".log") {
-				baseFilename += ".log"
-			}
-			return filepath.Join(dir, baseFilename)
-		}
-	}
-
-	// If it already looks like a base log file, return as-is
-	return filePath
+	return utils.MainLogPathFromFile(filePath)
 }
 
 // GetAllLogsWithIndexGrouped returns logs grouped by their base name (e.g., access.log includes access.log.1, access.log.2.gz etc.)

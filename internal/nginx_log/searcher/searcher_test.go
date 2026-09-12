@@ -83,9 +83,19 @@ func TestQueryBuilderValidation(t *testing.T) {
 		t.Errorf("valid request should not have validation error: %v", err)
 	}
 
-	// Test invalid request - negative limit
-	invalidReq := &SearchRequest{
+	// Limit -1 is the facet-only sentinel and must be accepted
+	facetOnlyReq := &SearchRequest{
 		Limit: -1,
+	}
+
+	err = qb.ValidateSearchRequest(facetOnlyReq)
+	if err != nil {
+		t.Errorf("facet-only limit (-1) should not have validation error: %v", err)
+	}
+
+	// Test invalid request - negative limit beyond the sentinel
+	invalidReq := &SearchRequest{
+		Limit: -2,
 	}
 
 	err = qb.ValidateSearchRequest(invalidReq)
@@ -178,29 +188,6 @@ func TestSearchRequestDefaults(t *testing.T) {
 	}
 }
 
-func TestCacheMiddleware(t *testing.T) {
-	cache := NewCache(100)
-	defer cache.Close()
-
-	middleware := NewMiddleware(cache, 5*time.Minute)
-
-	if !middleware.IsEnabled() {
-		t.Error("middleware should be enabled by default")
-	}
-
-	// Disable and test
-	middleware.Disable()
-	if middleware.IsEnabled() {
-		t.Error("middleware should be disabled")
-	}
-
-	// Re-enable
-	middleware.Enable()
-	if !middleware.IsEnabled() {
-		t.Error("middleware should be enabled")
-	}
-}
-
 func TestQueryBuilder(t *testing.T) {
 	qb := NewQueryBuilder()
 
@@ -218,25 +205,5 @@ func TestQueryBuilder(t *testing.T) {
 
 	if query == nil {
 		t.Error("BuildQuery should return a query")
-	}
-}
-
-func TestSuggestionQuery(t *testing.T) {
-	qb := NewQueryBuilder()
-
-	// Test suggestion query building
-	query, err := qb.BuildSuggestionQuery("test", "message")
-	if err != nil {
-		t.Errorf("BuildSuggestionQuery should not error: %v", err)
-	}
-
-	if query == nil {
-		t.Error("BuildSuggestionQuery should return a query")
-	}
-
-	// Test empty text
-	_, err = qb.BuildSuggestionQuery("", "message")
-	if err == nil {
-		t.Error("BuildSuggestionQuery should error for empty text")
 	}
 }

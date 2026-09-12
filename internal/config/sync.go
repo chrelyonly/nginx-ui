@@ -2,21 +2,18 @@ package config
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/0xJacky/Nginx-UI/internal/helper"
 	"github.com/0xJacky/Nginx-UI/internal/nginx"
+	"github.com/0xJacky/Nginx-UI/internal/nodeauth"
 	"github.com/0xJacky/Nginx-UI/internal/notification"
-	"github.com/0xJacky/Nginx-UI/internal/transport"
 	"github.com/0xJacky/Nginx-UI/model"
 	"github.com/0xJacky/Nginx-UI/query"
-	"github.com/0xJacky/Nginx-UI/settings"
 	"github.com/gin-gonic/gin"
 	"github.com/uozi-tech/cosy/logger"
 )
@@ -28,8 +25,15 @@ type SyncConfigPayload struct {
 	Overwrite bool   `json:"overwrite"`
 }
 
-func SyncToRemoteServer(c *model.Config) (err error) {
-	if c.Filepath == "" || len(c.SyncNodeIds) == 0 {
+func SyncToRemoteServer(c *model.Config, userName string) (err error) {
+	if c == nil || c.Filepath == "" {
+		return
+	}
+
+	// A file below a deployed directory inherits the directory targets, so the
+	// whole tree keeps replicating without configuring every file separately.
+	syncNodeIds, syncOverwrite := EffectiveSyncTargets(c)
+	if len(syncNodeIds) == 0 {
 		return
 	}
 
@@ -38,7 +42,7 @@ func SyncToRemoteServer(c *model.Config) (err error) {
 		return e.NewWithParams(50006, ErrPathIsNotUnderTheNginxConfDir.Error(), c.Filepath, nginxConfPath)
 	}
 
-	configBytes, err := os.ReadFile(c.Filepath)
+	configBytes, err := nginx.ReadFile(c.Filepath)
 	if err != nil {
 		return
 	}
@@ -47,7 +51,7 @@ func SyncToRemoteServer(c *model.Config) (err error) {
 		Name:      c.Name,
 		BaseDir:   strings.ReplaceAll(filepath.Dir(c.Filepath), nginx.GetConfPath(), ""),
 		Content:   string(configBytes),
-		Overwrite: c.SyncOverwrite,
+		Overwrite: syncOverwrite,
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -55,10 +59,10 @@ func SyncToRemoteServer(c *model.Config) (err error) {
 	}
 
 	q := query.Node
-	nodes, _ := q.Where(q.ID.In(c.SyncNodeIds...), q.Enabled.Is(true)).Find()
+	nodes, _ := q.Where(q.ID.In(syncNodeIds...), q.Enabled.Is(true)).Find()
 	for _, node := range nodes {
 		go func() {
-			err := payload.deploy(node, c, payloadBytes)
+			err := payload.deploy(node, c, payloadBytes, userName)
 			if err != nil {
 				logger.Error(err)
 			}
@@ -105,16 +109,14 @@ type SyncNotificationPayload struct {
 	StatusCode int    `json:"status_code"`
 	ConfigName string `json:"config_name"`
 	NodeName   string `json:"node_name"`
+	UserName   string `json:"user_name,omitempty"`
 	Response   string `json:"response"`
 }
 
-func (p *SyncConfigPayload) deploy(node *model.Node, c *model.Config, payloadBytes []byte) (err error) {
-	t, err := transport.NewTransport()
+func (p *SyncConfigPayload) deploy(node *model.Node, c *model.Config, payloadBytes []byte, userName string) (err error) {
+	client, err := nodeauth.NewHTTPClient(node, 0)
 	if err != nil {
 		return
-	}
-	client := http.Client{
-		Transport: t,
 	}
 	url, err := node.GetUrl("/api/configs")
 	if err != nil {
@@ -124,7 +126,6 @@ func (p *SyncConfigPayload) deploy(node *model.Node, c *model.Config, payloadByt
 	if err != nil {
 		return
 	}
-	req.Header.Set("X-Node-Secret", node.Token)
 	resp, err := client.Do(req)
 	if err != nil {
 		return
@@ -140,17 +141,31 @@ func (p *SyncConfigPayload) deploy(node *model.Node, c *model.Config, payloadByt
 		StatusCode: resp.StatusCode,
 		ConfigName: c.Name,
 		NodeName:   node.Name,
+		UserName:   userName,
 		Response:   string(respBody),
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		notification.Error("Sync Config Error", "Sync config %{config_name} to %{node_name} failed", notificationPayload)
+		notification.Error("Sync Config Error", syncConfigNotificationContent(userName, false), notificationPayload)
 		return
 	}
 
-	notification.Success("Sync Config Success", "Sync config %{config_name} to %{node_name} successfully", notificationPayload)
+	notification.Success("Sync Config Success", syncConfigNotificationContent(userName, true), notificationPayload)
 
 	return
+}
+
+func syncConfigNotificationContent(userName string, success bool) string {
+	if userName == "" {
+		if success {
+			return "Sync config %{config_name} to %{node_name} successfully"
+		}
+		return "Sync config %{config_name} to %{node_name} failed"
+	}
+	if success {
+		return "User %{user_name} synced config %{config_name} to %{node_name} successfully"
+	}
+	return "User %{user_name} failed to sync config %{config_name} to %{node_name}"
 }
 
 type RenameConfigPayload struct {
@@ -172,10 +187,9 @@ func (p *RenameConfigPayload) rename(node *model.Node) (err error) {
 		return
 	}
 
-	client := http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: settings.HTTPSettings.InsecureSkipVerify},
-		},
+	client, err := nodeauth.NewHTTPClient(node, 0)
+	if err != nil {
+		return err
 	}
 
 	payloadBytes, err := json.Marshal(gin.H{
@@ -194,7 +208,6 @@ func (p *RenameConfigPayload) rename(node *model.Node) (err error) {
 	if err != nil {
 		return
 	}
-	req.Header.Set("X-Node-Secret", node.Token)
 	resp, err := client.Do(req)
 	if err != nil {
 		return
@@ -264,10 +277,9 @@ type SyncDeleteNotificationPayload struct {
 }
 
 func (p *DeleteConfigPayload) delete(node *model.Node) (err error) {
-	client := http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: settings.HTTPSettings.InsecureSkipVerify},
-		},
+	client, err := nodeauth.NewHTTPClient(node, 0)
+	if err != nil {
+		return err
 	}
 
 	payloadBytes, err := json.Marshal(gin.H{
@@ -287,7 +299,6 @@ func (p *DeleteConfigPayload) delete(node *model.Node) (err error) {
 	if err != nil {
 		return
 	}
-	req.Header.Set("X-Node-Secret", node.Token)
 	resp, err := client.Do(req)
 	if err != nil {
 		return

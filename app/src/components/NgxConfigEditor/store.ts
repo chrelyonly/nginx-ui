@@ -1,18 +1,34 @@
 import type { NgxConfig, NgxDirective } from '@/api/ngx'
 
-export const useNgxConfigStore = defineStore('ngxConfig', () => {
-  const ngxConfig = ref<NgxConfig>({
+function createEmptyNgxConfig(): NgxConfig {
+  return {
     name: '',
     servers: [],
     upstreams: [],
-  })
+  }
+}
+
+export const useNgxConfigStore = defineStore('ngxConfig', () => {
+  const ngxConfig = ref<NgxConfig>(createEmptyNgxConfig())
 
   const configText = ref('')
 
   const curServerIdx = ref(0)
 
   function setNgxConfig(config: NgxConfig) {
-    ngxConfig.value = config
+    ngxConfig.value = {
+      ...createEmptyNgxConfig(),
+      ...config,
+    }
+    const serverCount = ngxConfig.value.servers?.length ?? 0
+    if (curServerIdx.value < 0 || curServerIdx.value >= serverCount)
+      curServerIdx.value = 0
+  }
+
+  function reset() {
+    curServerIdx.value = 0
+    configText.value = ''
+    ngxConfig.value = createEmptyNgxConfig()
   }
 
   const curServer = computed({
@@ -61,6 +77,7 @@ export const useNgxConfigStore = defineStore('ngxConfig', () => {
     configText,
     curServerIdx,
     setNgxConfig,
+    reset,
     curServer,
     curServerDirectives,
     curServerLocations,

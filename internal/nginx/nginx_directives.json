@@ -316,6 +316,11 @@
       "https://nginx.org/en/docs/http/ngx_http_oidc_module.html#client_secret"
     ]
   },
+  "common_name_in_csr": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_acme_module.html#common_name_in_csr"
+    ]
+  },
   "config_url": {
     "links": [
       "https://nginx.org/en/docs/http/ngx_http_oidc_module.html#config_url"
@@ -415,6 +420,11 @@
   "error_log": {
     "links": [
       "https://nginx.org/en/docs/ngx_core_module.html#error_log"
+    ]
+  },
+  "error_log_tag": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_core_module.html#error_log_tag"
     ]
   },
   "error_page": {
@@ -697,6 +707,16 @@
       "https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html#fastcgi_socket_keepalive"
     ]
   },
+  "fastcgi_socket_rcvbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html#fastcgi_socket_rcvbuf"
+    ]
+  },
+  "fastcgi_socket_sndbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html#fastcgi_socket_sndbuf"
+    ]
+  },
   "fastcgi_split_path_info": {
     "links": [
       "https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html#fastcgi_split_path_info"
@@ -859,6 +879,16 @@
   "grpc_socket_keepalive": {
     "links": [
       "https://nginx.org/en/docs/http/ngx_http_grpc_module.html#grpc_socket_keepalive"
+    ]
+  },
+  "grpc_socket_rcvbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_grpc_module.html#grpc_socket_rcvbuf"
+    ]
+  },
+  "grpc_socket_sndbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_grpc_module.html#grpc_socket_sndbuf"
     ]
   },
   "grpc_ssl_certificate": {
@@ -1230,6 +1260,7 @@
   },
   "js_access": {
     "links": [
+      "https://nginx.org/en/docs/http/ngx_http_js_module.html#js_access",
       "https://nginx.org/en/docs/stream/ngx_stream_js_module.html#js_access"
     ]
   },
@@ -1353,6 +1384,16 @@
     "links": [
       "https://nginx.org/en/docs/http/ngx_http_js_module.html#js_include",
       "https://nginx.org/en/docs/stream/ngx_stream_js_module.html#js_include"
+    ]
+  },
+  "js_load_http_native_module": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_js_module.html#js_load_http_native_module"
+    ]
+  },
+  "js_load_stream_native_module": {
+    "links": [
+      "https://nginx.org/en/docs/stream/ngx_stream_js_module.html#js_load_stream_native_module"
     ]
   },
   "js_path": {
@@ -1637,6 +1678,11 @@
   "max_errors": {
     "links": [
       "https://nginx.org/en/docs/mail/ngx_mail_core_module.html#max_errors"
+    ]
+  },
+  "max_headers": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_core_module.html#max_headers"
     ]
   },
   "max_ranges": {
@@ -2341,9 +2387,26 @@
       "https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_socket_keepalive"
     ]
   },
+  "proxy_socket_rcvbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_socket_rcvbuf",
+      "https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_socket_rcvbuf"
+    ]
+  },
+  "proxy_socket_sndbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_socket_sndbuf",
+      "https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_socket_sndbuf"
+    ]
+  },
   "proxy_ssl": {
     "links": [
       "https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_ssl"
+    ]
+  },
+  "proxy_ssl_alpn": {
+    "links": [
+      "https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html#proxy_ssl_alpn"
     ]
   },
   "proxy_ssl_certificate": {
@@ -2821,6 +2884,16 @@
   "scgi_socket_keepalive": {
     "links": [
       "https://nginx.org/en/docs/http/ngx_http_scgi_module.html#scgi_socket_keepalive"
+    ]
+  },
+  "scgi_socket_rcvbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_scgi_module.html#scgi_socket_rcvbuf"
+    ]
+  },
+  "scgi_socket_sndbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_scgi_module.html#scgi_socket_sndbuf"
     ]
   },
   "scgi_store": {
@@ -3319,11 +3392,6 @@
       "https://nginx.org/en/docs/http/ngx_http_upstream_module.html#sticky"
     ]
   },
-  "sticky_cookie_insert": {
-    "links": [
-      "https://nginx.org/en/docs/http/ngx_http_upstream_module.html#sticky_cookie_insert"
-    ]
-  },
   "stream": {
     "links": [
       "https://nginx.org/en/docs/stream/ngx_stream_core_module.html#stream"
@@ -3453,6 +3521,16 @@
   "tunnel_socket_keepalive": {
     "links": [
       "https://nginx.org/en/docs/http/ngx_http_tunnel_module.html#tunnel_socket_keepalive"
+    ]
+  },
+  "tunnel_socket_rcvbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_tunnel_module.html#tunnel_socket_rcvbuf"
+    ]
+  },
+  "tunnel_socket_sndbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_tunnel_module.html#tunnel_socket_sndbuf"
     ]
   },
   "types": {
@@ -3791,6 +3869,16 @@
       "https://nginx.org/en/docs/http/ngx_http_uwsgi_module.html#uwsgi_socket_keepalive"
     ]
   },
+  "uwsgi_socket_rcvbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_uwsgi_module.html#uwsgi_socket_rcvbuf"
+    ]
+  },
+  "uwsgi_socket_sndbuf": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_uwsgi_module.html#uwsgi_socket_sndbuf"
+    ]
+  },
   "uwsgi_ssl_certificate": {
     "links": [
       "https://nginx.org/en/docs/http/ngx_http_uwsgi_module.html#uwsgi_ssl_certificate"
@@ -3956,6 +4044,11 @@
   "xml_entities": {
     "links": [
       "https://nginx.org/en/docs/http/ngx_http_xslt_module.html#xml_entities"
+    ]
+  },
+  "xml_external_entities": {
+    "links": [
+      "https://nginx.org/en/docs/http/ngx_http_xslt_module.html#xml_external_entities"
     ]
   },
   "xslt_last_modified": {

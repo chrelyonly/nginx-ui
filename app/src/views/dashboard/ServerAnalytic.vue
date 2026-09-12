@@ -8,11 +8,22 @@ import { bytesToSize } from '@/lib/helper'
 import { useWebSocket } from '@/lib/websocket'
 import { useSettingsStore } from '@/pinia'
 
-let websocket: WebSocket
-
 const settings = useSettingsStore()
 
 const { language } = storeToRefs(settings)
+
+let isUnmounted = false
+
+const websocket = useWebSocket(analytic.serverWebSocketUrl, true, {
+  immediate: false,
+  onConnected: resetNetworkRateSample,
+  onDisconnected: resetNetworkRateSample,
+  onMessage: (_websocket, event) => {
+    if (!isUnmounted) {
+      wsOnMessage(event)
+    }
+  },
+})
 
 const rerender = ref(0)
 
@@ -53,6 +64,49 @@ const disk_io = reactive({ writes: 0, reads: 0 })
 const uptime = ref('')
 const loadavg = reactive({ load1: 0, load5: 0, load15: 0 }) as LoadStat
 const net = reactive({ recv: 0, sent: 0, last_recv: 0, last_sent: 0 })
+const ipAddresses = ref<string[]>([])
+
+interface NetworkSample {
+  bytesRecv: number
+  bytesSent: number
+  sampledAt: number
+}
+
+let lastNetworkSample: NetworkSample | undefined
+
+function resetNetworkRateSample() {
+  lastNetworkSample = undefined
+  net.recv = 0
+  net.sent = 0
+}
+
+function updateNetworkRate(network: { bytesRecv: number, bytesSent: number }, sampledAt: number) {
+  const previous = lastNetworkSample
+  const hasValidPreviousSample = previous
+    && sampledAt > previous.sampledAt
+    && network.bytesRecv >= previous.bytesRecv
+    && network.bytesSent >= previous.bytesSent
+
+  if (hasValidPreviousSample) {
+    const elapsedSeconds = (sampledAt - previous.sampledAt) / 1000
+    net.recv = (network.bytesRecv - previous.bytesRecv) / elapsedSeconds
+    net.sent = (network.bytesSent - previous.bytesSent) / elapsedSeconds
+  }
+  else {
+    net.recv = 0
+    net.sent = 0
+  }
+
+  net.last_recv = network.bytesRecv
+  net.last_sent = network.bytesSent
+  lastNetworkSample = {
+    bytesRecv: network.bytesRecv,
+    bytesSent: network.bytesSent,
+    sampledAt,
+  }
+
+  return Boolean(hasValidPreviousSample)
+}
 
 function net_formatter(bytes: number) {
   return `${bytesToSize(bytes)}/s`
@@ -62,37 +116,41 @@ function cpu_formatter(usage: number) {
   return usage.toFixed(2)
 }
 
-onMounted(() => {
-  analytic.init().then(r => {
-    Object.assign(host, r.host)
-    Object.assign(cpu_info, r.cpu.info)
-    Object.assign(memory, r.memory)
-    Object.assign(disk, r.disk)
+onMounted(async () => {
+  const r = await analytic.init()
 
-    // uptime
-    handle_uptime(r.host?.uptime)
+  if (isUnmounted) {
+    return
+  }
 
-    // load_avg
-    Object.assign(loadavg, r.loadavg)
+  Object.assign(host, r.host)
+  Object.assign(cpu_info, r.cpu.info)
+  Object.assign(memory, r.memory)
+  Object.assign(disk, r.disk)
+  ipAddresses.value = r.ip_addresses ?? []
 
-    net.last_recv = r.network.init.bytesRecv
-    net.last_sent = r.network.init.bytesSent
+  // uptime
+  handle_uptime(r.host?.uptime)
 
-    cpu_analytic_series[0].data = cpu_analytic_series[0].data.concat(r.cpu.user)
-    cpu_analytic_series[1].data = cpu_analytic_series[1].data.concat(r.cpu.total)
-    net_analytic[0].data = net_analytic[0].data.concat(r.network.bytesRecv)
-    net_analytic[1].data = net_analytic[1].data.concat(r.network.bytesSent)
-    disk_io_analytic[0].data = disk_io_analytic[0].data.concat(r.disk_io.writes)
-    disk_io_analytic[1].data = disk_io_analytic[1].data.concat(r.disk_io.reads)
+  // load_avg
+  Object.assign(loadavg, r.loadavg)
 
-    const { ws } = useWebSocket(analytic.serverWebSocketUrl)
-    websocket = ws.value!
-    websocket.onmessage = wsOnMessage
-  })
+  net.last_recv = r.network.init.bytesRecv
+  net.last_sent = r.network.init.bytesSent
+
+  cpu_analytic_series[0].data = [...cpu_analytic_series[0].data, ...r.cpu.user]
+  cpu_analytic_series[1].data = [...cpu_analytic_series[1].data, ...r.cpu.total]
+  net_analytic[0].data = [...net_analytic[0].data, ...r.network.bytesRecv]
+  net_analytic[1].data = [...net_analytic[1].data, ...r.network.bytesSent]
+  disk_io_analytic[0].data = [...disk_io_analytic[0].data, ...r.disk_io.writes]
+  disk_io_analytic[1].data = [...disk_io_analytic[1].data, ...r.disk_io.reads]
+
+  websocket.open()
 })
 
-onUnmounted(() => {
-  websocket?.close()
+onBeforeUnmount(() => {
+  isUnmounted = true
+  websocket.close()
 })
 
 function handle_uptime(t: number) {
@@ -115,9 +173,10 @@ function wsOnMessage(m: MessageEvent) {
 
   cpu.value = cpu_usage.toFixed(2)
 
-  const time = new Date().toLocaleString()
+  const sampledAt = Number.isFinite(r.sampled_at) ? r.sampled_at : Date.now()
+  const time = new Date(sampledAt).toISOString()
 
-  cpu_analytic_series[0].data.push({ x: time, y: r.cpu.user.toFixed(2) })
+  cpu_analytic_series[0].data.push({ x: time, y: Number(r.cpu.user.toFixed(2)) })
   cpu_analytic_series[1].data.push({ x: time, y: cpu_usage })
 
   if (cpu_analytic_series[0].data.length > 100) {
@@ -140,18 +199,14 @@ function wsOnMessage(m: MessageEvent) {
   Object.assign(loadavg, r.loadavg)
 
   // network
-  Object.assign(net, r.network)
-  net.recv = r.network.bytesRecv - net.last_recv
-  net.sent = r.network.bytesSent - net.last_sent
-  net.last_recv = r.network.bytesRecv
-  net.last_sent = r.network.bytesSent
+  if (updateNetworkRate(r.network, sampledAt)) {
+    net_analytic[0].data.push({ x: time, y: net.recv })
+    net_analytic[1].data.push({ x: time, y: net.sent })
 
-  net_analytic[0].data.push({ x: time, y: net.recv })
-  net_analytic[1].data.push({ x: time, y: net.sent })
-
-  if (net_analytic[0].data.length > 100) {
-    net_analytic[0].data.shift()
-    net_analytic[1].data.shift()
+    if (net_analytic[0].data.length > 100) {
+      net_analytic[0].data.shift()
+      net_analytic[1].data.shift()
+    }
   }
 
   disk_io_analytic[0].data.push(r.disk.writes)
@@ -178,7 +233,7 @@ function wsOnMessage(m: MessageEvent) {
       >
         <ACard
           :title="$gettext('Server Info')"
-          :bordered="false"
+          variant="borderless"
         >
           <p>
             {{ $gettext('Uptime:') }}
@@ -195,6 +250,14 @@ function wsOnMessage(m: MessageEvent) {
             <span class="os-platform">{{ ` ${host.platform}` }}</span> {{ host.platformVersion }}
             <span class="os-info">({{ host.os }} {{ host.kernelVersion }}
               {{ host.kernelArch }})</span>
+          </p>
+          <p>
+            {{ `${$gettext('Host')}:` }}
+            {{ host.hostname || 'N/A' }}
+          </p>
+          <p>
+            {{ `${$gettext('IP Address')}:` }}
+            <span class="ip-addresses">{{ ipAddresses.length > 0 ? ipAddresses.join(', ') : 'N/A' }}</span>
           </p>
           <p v-if="cpu_info">
             {{ `${$gettext('CPU:')} ` }}
@@ -215,7 +278,7 @@ function wsOnMessage(m: MessageEvent) {
       >
         <ACard
           :title="$gettext('Memory and Storage')"
-          :bordered="false"
+          variant="borderless"
         >
           <ARow :gutter="[0, 32]">
             <ACol
@@ -275,7 +338,7 @@ function wsOnMessage(m: MessageEvent) {
       >
         <ACard
           :title="$gettext('Network Statistics')"
-          :bordered="false"
+          variant="borderless"
         >
           <ARow :gutter="16">
             <ACol :span="12">
@@ -307,7 +370,7 @@ function wsOnMessage(m: MessageEvent) {
       >
         <ACard
           :title="$gettext('CPU Status')"
-          :bordered="false"
+          variant="borderless"
         >
           <AStatistic
             :value="cpu"
@@ -333,7 +396,7 @@ function wsOnMessage(m: MessageEvent) {
       >
         <ACard
           :title="$gettext('Network')"
-          :bordered="false"
+          variant="borderless"
         >
           <ARow :gutter="16">
             <ACol :span="12">
@@ -372,7 +435,7 @@ function wsOnMessage(m: MessageEvent) {
       >
         <ACard
           :title="$gettext('Disk IO')"
-          :bordered="false"
+          variant="borderless"
         >
           <ARow :gutter="16">
             <ACol :span="12">
@@ -406,10 +469,12 @@ function wsOnMessage(m: MessageEvent) {
 <style lang="less" scoped>
 .first-row {
   .ant-card {
-    min-height: 227px;
+    // Columns already stretch to the tallest one, so let the card fill its
+    // column to keep all cards in this row flush at the bottom.
+    height: 100%;
 
     p {
-      margin-bottom: 8px;
+      margin-bottom: 4px;
     }
   }
 
@@ -466,5 +531,9 @@ function wsOnMessage(m: MessageEvent) {
   @media (min-width: 1790px) or (max-width: 1200px) {
     display: none;
   }
+}
+
+.ip-addresses {
+  word-break: break-all;
 }
 </style>
